@@ -52,8 +52,9 @@ chmod +x run.sh          # 首次
 | `./run.sh install-ffmpeg` | 下载 FFmpeg 静态构建到 `bin/`（可透传 `--check` / `--file` / `--url` 等） |
 | `./run.sh create-user` / `reset-password` | 创建管理员 / 重置密码 |
 | `./run.sh systemd [--install]` | 生成 systemd 单元（加 `--install` 需 root，直接写入并启用） |
-| `./run.sh update` | 拉取新代码并重启：只换代码、不碰数据，重启后健康检查，失败自动回滚 |
-| `./run.sh autoupdate on\|off\|status\|adopt` | 定时自动更新（systemd timer / cron），详见 [DEPLOY.md「自动热更新」](./DEPLOY.md) |
+| `./run.sh update` | **手动**更新代码：拉取 → 只换代码路径 → 重启 → 健康检查，失败自动回滚（`--check` 只检查不改动） |
+| `./run.sh update-check on\|off\|status` | 可选：定时检查有没有新代码，**只提醒不执行**；详见 [DEPLOY.md「在服务器上更新代码」](./DEPLOY.md) |
+| `./run.sh adopt --repo URL` | 把迁移包部署的目录就地接管成 git 检出（更新需要它；不覆盖 `data/`、`assets/`、`admin.config.json`） |
 
 启动参数可覆盖默认值（也支持环境变量）：
 
@@ -458,10 +459,11 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 > 从零部署建议走「`./run.sh package` 打包 → 上传 → 解压 → `./run.sh setup`」这条路，
 > 步骤见上一节与包内 `DEPLOY.md`。下面是几种运行方式的对照。
 >
-> 想要「本地 `git push` 之后服务器自动换代码」，把部署目录接管成 git 检出再开定时器：
-> `./run.sh autoupdate adopt --repo <仓库地址>` + `sudo ./run.sh autoupdate on`，
-> 细节与安全边界见 [DEPLOY.md「自动热更新」](./DEPLOY.md)（更新只替换代码路径，
-> `data/`、`assets/` 里的上传内容与 `admin.config.json` 一概不动）。
+> 想要「一条命令更新服务器上的代码」：把部署目录接管成 git 检出
+> （`./run.sh adopt --repo <仓库地址>`），之后 `./run.sh update` 就够用——它只换代码路径，
+> `data/`、`assets/` 里的上传内容与 `admin.config.json` 一概不动，重启后健康检查失败会
+> 自动回滚。还能选装一个「定时检查有新代码」的提醒（`sudo ./run.sh update-check on`，
+> 只提醒不执行）。细节见 [DEPLOY.md「在服务器上更新代码」](./DEPLOY.md)。
 
 **方式一：SSH 端口转发（推荐，最省事也最安全）**
 
@@ -566,7 +568,7 @@ Photography/
 │   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
 │   ├── exifread.py           # 标准库图片 EXIF 解析（JPEG / TIFF / PNG / WebP）
 │   ├── videometa.py          # 标准库视频容器解析（MP4/MOV、MKV/WebM、AVI 的时长/分辨率/帧率/编码/设备）
-│   ├── autoupdate.py         # 自动热更新：只换代码路径、只快进、作者白名单、可回滚
+│   ├── autoupdate.py         # 代码更新：只换代码路径、只快进、作者白名单、可回滚、只提醒的定时检查
 │   └── media.py              # ffmpeg / ffprobe 封装与多位置探测（可选）
 ├── admin/                    # 后台前端（薄客户端：只渲染）
 │   ├── index.html            # 登录视图 + 后台视图
@@ -779,9 +781,10 @@ graph TD
   时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间（MP4 / MOV / MKV / WebM / AVI，**不需要 ffprobe**）。
 - **FFmpeg 集成**：三级查找（环境变量 / 项目 `bin/` / 系统 PATH），一条命令装静态构建并随项目打包。
 - **一键运行**：`run.sh` 把自检、装依赖、打包、建号、启动、看日志、装 systemd 收在一起。
-- **自动热更新**：`./run.sh update` 拉取代码并重启（只换代码路径、只快进、作者白名单、
-  上传中推迟、健康检查失败自动回滚）；`sudo ./run.sh autoupdate on` 装成定时器，
-  本地 `git push` 后服务器自己生效。
+- **手动更新代码**：`./run.sh update` 一条命令完成「拉取 → 只换代码 → 重启 → 健康检查 →
+  失败自动回滚」；只替换代码路径，`data/` 与 `assets/` 里的上传内容、`admin.config.json`
+  一概不动。可选装一个「定时检查有新代码」的提醒（`./run.sh update-check on`，**只提醒
+  不执行**）—— 更新的执行留在你手里，不做无人值守的自动上线。
 - **打包迁移**：`./run.sh package` 生成自包含的 tar.gz（含 FFmpeg），解压即可在服务器上运行。
 
 ---

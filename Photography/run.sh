@@ -16,8 +16,9 @@
 #   ./run.sh create-user    创建管理员账号
 #   ./run.sh reset-password 重置管理员密码
 #   ./run.sh systemd        生成 systemd 单元文件（可用 sudo 安装）
-#   ./run.sh update         拉取新代码并重启（只换代码，不碰数据；失败自动回滚）
-#   ./run.sh autoupdate     on|off|status|adopt 定时自动更新
+#   ./run.sh update         手动拉取新代码并重启（只换代码，不碰数据；失败自动回滚）
+#   ./run.sh update-check   可选的定时检查：只提醒有没有新代码，不执行更新
+#   ./run.sh adopt          把迁移包部署的目录就地接管成 git 检出
 #   ./run.sh help           显示本帮助
 #
 # 可用环境变量：
@@ -381,6 +382,14 @@ for name in ("albums", "photos", "videos"):
 print("  数据     : " + "  ".join(parts))
 PY
 
+  # 代码更新提醒（由 ./run.sh update --check / 定时检查写入）
+  if [ -s "$RUN_DIR/update-pending.json" ]; then
+    local pending_json
+    pending_json="$(cat "$RUN_DIR/update-pending.json")"
+    info "  待更新   : 落后 $(json_get "$pending_json" behind) 个提交（检查于 $(json_get "$pending_json" at)）→ ./run.sh update"
+  fi
+  legacy_auto_update_warning
+
   # 健康检查
   if is_running; then
     local found=0
@@ -558,10 +567,14 @@ systemd() {
   info "  sudo systemctl daemon-reload && sudo systemctl enable --now $unit_name"
 }
 
-# ---------- 自动热更新 ----------
+# ---------- 代码更新 ----------
 #
-# 目标：本地 `git push` 之后，服务器在几分钟内自动换成新代码并重启，不用再登录
-# 服务器手动 pull + restart。实现要点（详见 adminlib/autoupdate.py 与 DEPLOY.md）：
+# 更新**默认是手动的**：`./run.sh update` 一条命令完成「拉取 → 只换代码 → 重启 →
+# 健康检查 → 失败回滚」。做成手动是有意的：单人小站上，「推任何东西服务器就自己
+# 换代码并重启」的收益只是省一次登录，代价是把 `git push` 从「记录代码」变成
+# 「在服务器上执行代码」。所以定时器（`./run.sh update-check on`）只检查、只提醒。
+#
+# 实现要点（详见 adminlib/autoupdate.py 与 DEPLOY.md）：
 #   · 只换**代码路径**，data/ 与 assets/ 里的上传内容、admin.config.json 一律不碰；
 #   · 只快进，分叉就拒绝，绝不自动 merge；
 #   · 新提交的作者必须在白名单里（首次安装时按当时的作者快照生成）；
@@ -569,8 +582,9 @@ systemd() {
 #   · 重启后健康检查失败就自动回滚到上一个版本。
 
 ADMIN_SERVICE="photography-admin.service"
-AUTOUPDATE_SERVICE="photography-update.service"
-AUTOUPDATE_TIMER="photography-update.timer"
+UPDATE_CHECK_SERVICE="photography-update-check.service"
+UPDATE_CHECK_TIMER="photography-update-check.timer"
+LEGACY_UPDATE_UNITS="photography-update.service photography-update.timer"
 AUTOUPDATE_LOCK="$RUN_DIR/autoupdate.lock"
 
 au() { py -m adminlib.autoupdate "$@"; }
@@ -761,10 +775,68 @@ _update_body() {
   return 1
 }
 
+# 只检查、不改动任何文件（定时器与 `./run.sh update --check` 都走这条）。
+# 除了 `git fetch`（只写 .git 内部）之外没有任何副作用：不换代码、不重启、不写状态。
+# 结果由模块写进 .run/update-pending.json，供 `./run.sh status` 提醒。
+check_for_updates() {
+  local quiet="$1"
+  local out="" rc=0
+  out="$(au check --json 2>"$RUN_DIR/autoupdate.err")" || rc=$?
+  if [ -z "$out" ]; then
+    err "检查更新失败：$(tail -n 1 "$RUN_DIR/autoupdate.err" 2>/dev/null)"
+    return 1
+  fi
+
+  local state behind
+  state="$(json_get "$out" state)"
+  behind="$(json_get "$out" behind)"
+  [ "$quiet" -eq 0 ] && _show_check "$out"
+
+  case "$state" in
+    unchanged)
+      [ "$quiet" -eq 0 ] && ok "已是最新版本（$(json_get "$out" head_short)）"
+      return 0
+      ;;
+    update-available)
+      warn "有新代码：落后 $behind 个提交（$(json_get "$out" remote_short)）"
+      info "更新： ./run.sh update"
+      return 0
+      ;;
+    blocked)
+      warn "有新代码但被规则拦下：$(json_get "$out" blockers)"
+      info "  确认后： ./run.sh update --accept-authors"
+      return 0
+      ;;
+    fetch-failed)
+      err "拉取远端失败（下一轮再试）：$(json_get "$out" blockers)"
+      return 1
+      ;;
+    not-a-repo|no-git)
+      [ "$quiet" -eq 0 ] && warn "不是 git 检出，没有可检查的更新（要的话先 ./run.sh adopt --repo <仓库地址>）"
+      return 0
+      ;;
+    *)
+      [ "$quiet" -eq 0 ] && warn "无法判断更新：$state"
+      return 0
+      ;;
+  esac
+}
+
+# 渲染检查结果：先说清「只检查」，再列待更新提交
+_show_check() {
+  local out="$1"
+  info "本次只检查：没有替换代码、没有重启服务"
+  printf '%s' "$out" | au show
+  if [ "$(json_get "$out" state)" = "update-available" ]; then
+    info "要更新就执行： ./run.sh update"
+  fi
+}
+
 update() {
-  local force=0 quiet=0 accept_authors=0
+  local force=0 quiet=0 accept_authors=0 check_only=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --check|--dry-run|--only-check) check_only=1; shift ;;   # 只检查，不改动任何文件
       --force)          force=1; shift ;;   # 上传中也重启 / 允许覆盖本地改过的代码
       --accept-authors) accept_authors=1; shift ;;   # 把本次提交的作者加入白名单
       --quiet|-q)       quiet=1; shift ;;
@@ -776,13 +848,22 @@ update() {
   require_python
 
   if [ ! -d "$APP_DIR/.git" ]; then
+    if [ "$check_only" -eq 1 ]; then
+      [ "$quiet" -eq 0 ] && warn "不是 git 检出，没有可检查的更新"
+      return 0
+    fi
     err "这里不是 git 检出，没法自动更新（用迁移包解压部署的目录就是这种）"
     info ""
     info "两条路："
     info "  1) 就地接管成 git 检出（不会覆盖 data/、assets/、admin.config.json）："
-    info "     ./run.sh autoupdate adopt --repo https://github.com/hurss11/Collection-of-Time.git"
+    info "     ./run.sh adopt --repo https://github.com/hurss11/Collection-of-Time.git"
     info "  2) 继续手工升级：本地 ./run.sh package → 上传 → 解压覆盖"
     return 1
+  fi
+
+  if [ "$check_only" -eq 1 ]; then
+    check_for_updates "$quiet"
+    return $?
   fi
 
   if [ "$force" -eq 0 ] && au busy >/dev/null 2>&1; then
@@ -801,29 +882,54 @@ autoupdate_status() {
   banner
   require_python
   info ""
-  step "代码更新状态"
+  step "代码更新状态（更新是手动的，定时器只负责提醒）"
   au inspect --no-fetch 2>/dev/null || true
   info ""
   if [ -s "$RUN_DIR/autoupdate.state" ]; then
-    info "上次应用： $(json_get "$(au state)" applied | cut -c1-8)  ($(json_get "$(au state)" at))"
+    info "上次更新： $(json_get "$(au state)" applied | cut -c1-8)  ($(json_get "$(au state)" at))"
+  fi
+  if [ -s "$RUN_DIR/update-pending.json" ]; then
+    local pending
+    pending="$(cat "$RUN_DIR/update-pending.json")"
+    warn "待更新： 落后 $(json_get "$pending" behind) 个提交（上次检查 $(json_get "$pending" at)）"
+    info "          更新： ./run.sh update"
+    local blockers
+    blockers="$(json_get "$pending" blockers)"
+    [ "$blockers" != "[]" ] && [ -n "$blockers" ] && info "          拦下： $blockers"
   fi
   if au busy >/dev/null 2>&1; then
     warn "此刻正在上传，更新会推迟到下一轮"
   fi
   info ""
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet "$AUTOUPDATE_TIMER" 2>/dev/null; then
-      ok "定时器：已开启（$AUTOUPDATE_TIMER）"
-      systemctl list-timers "$AUTOUPDATE_TIMER" --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/  /'
+    if systemctl is-active --quiet "$UPDATE_CHECK_TIMER" 2>/dev/null; then
+      ok "定时检查：已开启（$UPDATE_CHECK_TIMER，只提醒不执行）"
+      systemctl list-timers "$UPDATE_CHECK_TIMER" --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/  /'
+    elif systemctl list-unit-files "$UPDATE_CHECK_TIMER" 2>/dev/null | grep -q "$UPDATE_CHECK_TIMER"; then
+      warn "定时检查：已安装但未启用 —— sudo ./run.sh update-check on"
     else
-      warn "定时器：未开启 —— sudo ./run.sh autoupdate on 打开"
+      info "定时检查：未开启（可选的，只提醒不自动更新；sudo ./run.sh update-check on）"
     fi
   else
-    info "这台机器没有 systemd：用 cron 定时跑 ./run.sh update --quiet"
+    info "这台机器没有 systemd：想定时提醒就用 cron 跑 ./run.sh update --check --quiet"
   fi
+  legacy_auto_update_warning
 }
 
-autoupdate_on() {
+# 早期版本装过「会自动应用更新」的定时器。它还在跑的话必须提醒 —— 那是无人值守执行代码。
+legacy_auto_update_warning() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local name
+  for name in $LEGACY_UPDATE_UNITS; do
+    [ -f "/etc/systemd/system/$name" ] || continue
+    if systemctl is-active --quiet "$name" 2>/dev/null; then
+      warn "注意：$name 仍在运行 —— 那是早期版本「会自动换代码」的单元，更新会在无人确认下发生"
+      info "      关掉它： sudo ./run.sh update-check off（会一并清掉这两个旧单元）"
+    fi
+  done
+}
+
+update_check_on() {
   local interval="${UPDATE_INTERVAL:-5min}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -833,41 +939,52 @@ autoupdate_on() {
     esac
   done
 
-  [ "$(id -u)" -eq 0 ] || die "安装定时器需要 root： sudo ./run.sh autoupdate on"
+  [ "$(id -u)" -eq 0 ] || die "安装定时器需要 root： sudo ./run.sh update-check on"
   require_python
   if ! command -v systemctl >/dev/null 2>&1; then
     err "这台机器没有 systemd，改用 cron："
-    info "  (crontab -l 2>/dev/null; echo \"*/5 * * * * cd $APP_DIR && ./run.sh update --quiet >> .run/update.log 2>&1\") | crontab -"
+    info "  (crontab -l 2>/dev/null; echo \"*/5 * * * * cd $APP_DIR && ./run.sh update --check --quiet >> .run/update-check.log 2>&1\") | crontab -"
     return 1
   fi
   if [ ! -d "$APP_DIR/.git" ]; then
-    warn "这里不是 git 检出：定时器会因为 ConditionPathIsDirectory 直接跳过"
-    info "  先接管： ./run.sh autoupdate adopt --repo <仓库地址>"
+    warn "这里不是 git 检出：定时检查会因为 ConditionPathIsDirectory 直接跳过"
+    info "  先接管： ./run.sh adopt --repo <仓库地址>"
   fi
 
   py -m adminlib.autoupdate units --interval "$interval" --out /etc/systemd/system >/dev/null \
     || die "写出 systemd 单元文件失败"
+  # 早期版本装过一次「会自动应用更新」的单元，换名字时顺手清掉，免得两个定时器同时跑
+  local legacy
+  for legacy in $LEGACY_UPDATE_UNITS; do
+    [ -f "/etc/systemd/system/$legacy" ] && rm -f "/etc/systemd/system/$legacy" && info "已移除旧单元：$legacy"
+  done
   systemctl daemon-reload
-  systemctl enable --now "$AUTOUPDATE_TIMER" || die "启用定时器失败"
-  ok "自动更新已开启：每 $interval 检查一次"
+  systemctl enable --now "$UPDATE_CHECK_TIMER" || die "启用定时器失败"
+  ok "定时检查已开启：每 $interval 检查一次有没有新代码"
+  info "  —— 它**只提醒、不执行**：发现新版本只写进 .run/update-pending.json 与日志"
   info ""
-  info "  立刻跑一次 ： ./run.sh update"
-  info "  看计划     ： systemctl list-timers $AUTOUPDATE_TIMER"
-  info "  看结果日志 ： journalctl -u $AUTOUPDATE_SERVICE -n 50"
-  info "  关掉       ： sudo ./run.sh autoupdate off"
+  info "  看有没有新版本 ： ./run.sh update-check status"
+  info "  立刻检查一次   ： ./run.sh update --check"
+  info "  更新代码       ： ./run.sh update"
+  info "  看检查日志     ： journalctl -u $UPDATE_CHECK_SERVICE -n 50"
+  info "  关掉定时检查   ： sudo ./run.sh update-check off"
 }
 
-autoupdate_off() {
-  [ "$(id -u)" -eq 0 ] || die "卸载定时器需要 root： sudo ./run.sh autoupdate off"
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl disable --now "$AUTOUPDATE_TIMER" 2>/dev/null || true
-  fi
-  rm -f "/etc/systemd/system/$AUTOUPDATE_TIMER" "/etc/systemd/system/$AUTOUPDATE_SERVICE"
+update_check_off() {
+  [ "$(id -u)" -eq 0 ] || die "卸载定时器需要 root： sudo ./run.sh update-check off"
+  local name
+  for name in "$UPDATE_CHECK_TIMER" $LEGACY_UPDATE_UNITS; do
+    if command -v systemctl >/dev/null 2>&1 && [ -f "/etc/systemd/system/$name" ]; then
+      systemctl disable --now "$name" 2>/dev/null || true
+    fi
+    rm -f "/etc/systemd/system/$name"
+  done
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload
-  ok "自动更新已关闭（单元文件已删除；代码与数据都没动）"
+  ok "定时检查已关闭（单元文件已删除；代码与数据都没动）"
 }
 
-autoupdate_adopt() {
+# 把「解压迁移包」的部署目录就地接管成 git 检出 —— 手动更新也要求是 git 检出
+adopt() {
   local repo="${UPDATE_REPO:-}" branch="main" assume_yes=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -879,7 +996,7 @@ autoupdate_adopt() {
       *) die "未知参数：$1（可用 --repo / --branch / --yes）" ;;
     esac
   done
-  [ -n "$repo" ] || die "需要仓库地址： ./run.sh autoupdate adopt --repo https://github.com/hurss11/Collection-of-Time.git"
+  [ -n "$repo" ] || die "需要仓库地址： ./run.sh adopt --repo https://github.com/hurss11/Collection-of-Time.git"
   require_python
 
   banner
@@ -908,7 +1025,7 @@ autoupdate_adopt() {
     info "  代码对齐时改动了： $(json_get "$result" changed)"
     if service_running; then
       step "代码换过版本了，重启一次让新代码生效"
-      restart_service || warn "重启失败，请手工检查"
+      ensure_service_running || warn "拉起服务失败（继续做健康检查）"
       if wait_health "http://127.0.0.1:$(service_port)/api/health" 40; then
         ok "服务已恢复正常"
       else
@@ -918,18 +1035,19 @@ autoupdate_adopt() {
     fi
   fi
   info ""
-  info "接下来： sudo ./run.sh autoupdate on    # 打开定时自动更新"
+  info "之后手动更新代码： ./run.sh update"
+  info "可选：定时提醒有没有新版本  sudo ./run.sh update-check on"
 }
 
-autoupdate() {
+update_check() {
   local action="${1:-status}"
   shift || true
   case "$action" in
-    on|enable|install)   autoupdate_on "$@" ;;
-    off|disable|remove)  autoupdate_off "$@" ;;
+    on|enable|install)   update_check_on "$@" ;;
+    off|disable|remove)  update_check_off "$@" ;;
     status|show|"")      autoupdate_status ;;
-    adopt|takeover)      autoupdate_adopt "$@" ;;
-    *) err "未知参数：$action（可用 on / off / status / adopt）"; exit 2 ;;
+    adopt|takeover)      adopt "$@" ;;
+    *) err "未知参数：$action（可用 on / off / status）"; exit 2 ;;
   esac
 }
 
@@ -1475,23 +1593,23 @@ Photography 一键运行脚本
   ./run.sh create-user     创建管理员账号
   ./run.sh reset-password  重置管理员密码
   ./run.sh systemd         [--install] 生成/安装 systemd 常驻服务
-  ./run.sh update          [--force] [--quiet] [--accept-authors]
-                           立即拉取新代码并重启（失败自动回滚）
-  ./run.sh autoupdate      on|off|status|adopt 定时自动更新（systemd timer）
+  ./run.sh update          [--check] [--force] [--accept-authors]
+                           手动拉取新代码并重启（失败自动回滚；--check 只看不动）
+  ./run.sh update-check    on|off|status   可选：定时检查有没有新代码（只提醒，不执行）
+  ./run.sh adopt           --repo URL   把迁移包部署的目录就地接管成 git 检出
   ./run.sh https           [--domain D] 配 HTTPS 反代 + 签发证书 + 线上自检
   ./run.sh help            显示本帮助
 
-自动更新（./run.sh update / autoupdate）：
-  ./run.sh update                     拉取 origin/main，只换代码，重启并健康检查
+更新代码（默认手动；只换代码路径，不碰 data/ 与上传内容）：
+  ./run.sh update                     拉取 origin/main → 只换代码 → 重启 → 健康检查
+  ./run.sh update --check             只检查有没有新版本，什么都不改
   ./run.sh update --force             正在上传也重启 / 允许覆盖本地改过的代码
   ./run.sh update --accept-authors    这次提交的作者不在白名单里时，显式放行并记住
-  sudo ./run.sh autoupdate on         装 systemd timer，每 5 分钟自动检查一次
-  sudo ./run.sh autoupdate on --interval 15min
-  sudo ./run.sh autoupdate off        关掉自动更新（代码与数据都不动）
-  ./run.sh autoupdate status          看当前落后几个提交、定时器状态
-  ./run.sh autoupdate adopt --repo URL
-                                      把迁移包部署的目录就地接管成 git 检出
-                                      （不覆盖 data/、assets/、admin.config.json）
+  ./run.sh adopt --repo URL           用迁移包部署的目录先接管成 git 检出
+  sudo ./run.sh update-check on       可选：每 5 分钟检查一次并提醒（只写日志/状态，
+                                      绝不自动换代码、绝不重启）；--interval 15min 可调
+  sudo ./run.sh update-check off      关掉定时检查（代码与数据都不动）
+  ./run.sh update-check status        看落后几个提交、上次检查什么时候、定时器状态
 
 可选参数（start / restart）：
   --port 9000 --host 0.0.0.0 --session-hours 8 --foreground
@@ -1536,7 +1654,8 @@ main() {
     reset-password) reset_password "$@" ;;
     systemd)        systemd "$@" ;;
     update|upgrade) update "$@" ;;
-    autoupdate|auto-update) autoupdate "$@" ;;
+    update-check|autoupdate|auto-update|notify) update_check "$@" ;;
+    adopt|takeover) adopt "$@" ;;
     https|https-proxy|ssl) https "$@" ;;
     help|-h|--help) usage ;;
     *)              err "未知命令：$command"; info ""; usage; exit 2 ;;

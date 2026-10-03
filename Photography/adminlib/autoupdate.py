@@ -1,4 +1,4 @@
-"""自动热更新：把服务器上的**代码**换到最新，绝不碰内容。
+"""代码更新：把服务器上的**代码**换到最新，绝不碰内容。
 
 服务器目录里混着两类东西：
 
@@ -10,7 +10,13 @@
 
     git checkout <新版本> -- <CODE_PATHS>
 
-设计取舍（都写进了 DEPLOY.md「自动热更新」一节）：
+**更新默认是手动的**（`./run.sh update`）。这样安排是有意的：单人小站上，「推任何东西
+服务器就自己换代码并重启」的收益只是省下一次登录，代价却是把 `git push` 从「记录代码」
+变成「在服务器上执行代码」——手机上改一行、误推一次、合错分支，站点都会无声地变掉。
+定时器（`./run.sh update-check on`）因此**只检查、只提醒，绝不换代码**；要更新还是
+自己跑一条命令。
+
+设计取舍（都写进了 DEPLOY.md「更新代码」一节）：
 
 1. **只快进**：本地历史与远端分叉就拒绝，绝不自动 merge / rebase；
 2. **只换代码路径**：范围外的文件一个字节都不动（新增不会带进来，删除也不会删）；
@@ -25,7 +31,7 @@
 
 安全边界要说清：**能往 `main` 推代码的人，等于能在这台服务器上执行代码**。
 白名单、只快进、只换代码路径这些措施防的是「误配 / 意外覆盖 / 第三方扫到仓库」，
-防不了仓库本身被入侵。担心的话就别开自动更新，改成手动 `./run.sh update`。
+防不了仓库本身被入侵。所以更进一层的答案是：**别让更新自动发生**。
 """
 from __future__ import annotations
 
@@ -69,13 +75,18 @@ STATE_PATH = ROOT / ".run" / "autoupdate.state"
 AUTHORS_PATH = ROOT / ".run" / "autoupdate.authors"
 REMOTE_PATH = ROOT / ".run" / "autoupdate.remote"
 ACTIVITY_PATH = ROOT / ".run" / "activity.json"
+PENDING_PATH = ROOT / ".run" / "update-pending.json"   # 定时检查发现的新版本（只提醒用）
 
 GIT_TIMEOUT = 300
 STATE_KEEP = 5               # 状态文件里保留最近几个已应用版本（供连续回滚）
 DEFAULT_INTERVAL = "5min"
 SERVICE_UNIT = "photography-admin.service"      # 要重启的那个服务
-UPDATE_SERVICE = "photography-update.service"   # 拉代码 + 重启（oneshot）
-UPDATE_TIMER = "photography-update.timer"
+UPDATE_CHECK_SERVICE = "photography-update-check.service"   # 定时检查（只提醒，不执行）
+UPDATE_CHECK_TIMER = "photography-update-check.timer"
+# 早期版本装过一次的单元名（当时还会自动应用），卸载时一并清掉
+LEGACY_UNITS = ("photography-update.service", "photography-update.timer")
+UPDATE_SERVICE = UPDATE_CHECK_SERVICE           # 兼容旧引用
+UPDATE_TIMER = UPDATE_CHECK_TIMER
 
 
 class GitError(RuntimeError):
@@ -188,6 +199,43 @@ def locked_remote() -> str:
 def lock_remote(url: str) -> None:
     if url:
         _write_json(REMOTE_PATH, {"url": url, "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+# ---------------------------------------------------------------- 待更新提醒
+
+
+def pending() -> dict:
+    """上次定时检查发现的待更新版本（没有就是空字典）。"""
+    return _read_json(PENDING_PATH, {})
+
+
+def clear_pending() -> None:
+    try:
+        PENDING_PATH.unlink()
+    except OSError:
+        pass
+
+
+def record_pending(info: dict) -> dict:
+    """把「有新版本」写到 `.run/update-pending.json`，供 `./run.sh status` 提醒；没有就清掉。"""
+    behind = info.get("behind") or 0
+    if info.get("state") in ("update-available", "blocked") and behind:
+        payload = {
+            "behind": behind,
+            "head": info.get("head", ""),
+            "remote": info.get("remote_sha", ""),
+            "remote_short": info.get("remote_short", ""),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "commits": [
+                {key: commit.get(key) for key in ("short", "date", "author", "subject")}
+                for commit in (info.get("commits") or [])[:10]
+            ],
+            "blockers": list(info.get("blockers") or []),
+        }
+        _write_json(PENDING_PATH, payload)
+        return payload
+    clear_pending()
+    return {}
 
 
 # ---------------------------------------------------------------- 上传活动
@@ -434,6 +482,7 @@ def apply(*, branch: str = BRANCH, accept_authors: bool = False,
     history = [previous, *[item for item in old["history"] if item not in (previous, target)]]
     save_state(applied=target, history=history, branch=branch, remote=info["remote"])
     lock_remote(info["remote"])
+    clear_pending()               # 已经更新过了，提醒可以撤掉
     if info["new_authors"]:
         remember_authors(info["new_authors"])
 
@@ -521,7 +570,7 @@ def normalize_interval(text: str) -> str:
 
 def update_service_unit() -> str:
     return f"""[Unit]
-Description=Collection of Time - 自动热更新（拉取 {BRANCH} 并把代码换成最新）
+Description=Collection of Time - 检查是否有新代码（只提醒，不执行更新）
 After=network-online.target
 Wants=network-online.target
 # 没有 .git（用迁移包解压的部署）就不必反复失败，直接跳过
@@ -530,17 +579,18 @@ ConditionPathIsDirectory={ROOT}/.git
 [Service]
 Type=oneshot
 WorkingDirectory={ROOT}
-ExecStart={ROOT}/run.sh update --quiet
-# 拉取 + 重启 + 健康检查，给足时间；上传中会推迟到下一轮，不会拖很久
-TimeoutStartSec=900
-Nice=5
+# 注意：这里是 --check —— 只拉取远端信息并写进 .run/update-pending.json，
+# 不会替换任何代码、不会重启服务。要更新请手动执行 ./run.sh update
+ExecStart={ROOT}/run.sh update --check --quiet
+TimeoutStartSec=300
+Nice=10
 """
 
 
 def update_timer_unit(interval: str = DEFAULT_INTERVAL) -> str:
     every = normalize_interval(interval)
     return f"""[Unit]
-Description=Collection of Time - 每 {every} 检查一次代码更新
+Description=Collection of Time - 每 {every} 检查一次有没有新代码（只提醒）
 
 [Timer]
 # 开机 3 分钟后再开始（先把服务起好），之后每 {every} 检查一次
@@ -549,7 +599,7 @@ OnUnitActiveSec={every}
 RandomizedDelaySec=60
 AccuracySec=30
 Persistent=true
-Unit={UPDATE_SERVICE}
+Unit={UPDATE_CHECK_SERVICE}
 
 [Install]
 WantedBy=timers.target
@@ -559,7 +609,8 @@ WantedBy=timers.target
 def write_units(out_dir: Path, interval: str = DEFAULT_INTERVAL) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for name, text in ((UPDATE_SERVICE, update_service_unit()), (UPDATE_TIMER, update_timer_unit(interval))):
+    for name, text in ((UPDATE_CHECK_SERVICE, update_service_unit()),
+                       (UPDATE_CHECK_TIMER, update_timer_unit(interval))):
         path = out_dir / name
         path.write_text(text, encoding="utf-8")
         written.append(path)
@@ -610,6 +661,15 @@ def _print_inspect(info: dict) -> None:
         print(f"拦下     : {blocker}")
 
 
+def _print_check(info: dict) -> None:
+    print("（本次只检查：只拉取远端信息，没有替换任何代码、没有重启服务）")
+    _print_inspect(info)
+    if info["state"] == "update-available":
+        print("要更新就执行： ./run.sh update")
+    elif info["state"] == "unchanged":
+        print("无需操作。")
+
+
 def _load(path: Path):
     if not path.is_file():
         return None
@@ -622,17 +682,19 @@ def _load(path: Path):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m adminlib.autoupdate",
-        description="自动热更新：只换代码路径，不碰站点内容",
+        description="代码更新：只换代码路径，不碰站点内容",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
-               "  python -m adminlib.autoupdate inspect          检查有没有新版本\n"
+               "  python -m adminlib.autoupdate check            只检查有没有新版本（会写提醒）\n"
+               "  python -m adminlib.autoupdate inspect          检查（不写提醒）\n"
                "  python -m adminlib.autoupdate apply            应用更新（只改代码）\n"
                "  python -m adminlib.autoupdate rollback         回到上一个版本\n"
                "  python -m adminlib.autoupdate adopt --url URL  把迁移包部署接管成 git 检出\n"
-               "  python -m adminlib.autoupdate units --out DIR  写出 systemd 单元文件\n",
+               "  python -m adminlib.autoupdate units --out DIR  写出 systemd 单元文件（只检查用的）\n",
     )
-    parser.add_argument("command", choices=("inspect", "apply", "rollback", "adopt", "units", "busy", "state", "show"),
-                        help="要做的动作（show 读标准输入的 JSON 并渲染）")
+    parser.add_argument("command",
+                        choices=("inspect", "check", "apply", "rollback", "adopt", "units", "busy", "state", "show"),
+                        help="要做的动作（check = 只检查并写提醒；show 读标准输入的 JSON 并渲染）")
     parser.add_argument("--json", action="store_true", help="输出 JSON（给脚本用）")
     parser.add_argument("--branch", default=BRANCH, help=f"分支，默认 {BRANCH}")
     parser.add_argument("--url", default="", help="adopt 用：远端仓库地址")
@@ -679,6 +741,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(info["blockers"][0] if info["blockers"] else info["state"], file=sys.stderr)
         return 3
+
+    if args.command == "check":
+        # 只检查：除了 git fetch（写 .git 内部）之外不改任何东西，
+        # 结果写进 .run/update-pending.json 供 ./run.sh status 提醒。
+        info = inspect(fetch=not args.no_fetch, branch=args.branch)
+        if args.json:
+            print(json.dumps(info, ensure_ascii=False))
+        else:
+            _print_check(info)
+        record_pending(info)
+        return 1 if info["state"] == "fetch-failed" else 0
 
     if args.command == "apply":
         result = apply(branch=args.branch, accept_authors=args.accept_authors, allow_dirty=args.allow_dirty)
