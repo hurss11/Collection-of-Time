@@ -279,6 +279,43 @@ export function renderQueue(files) {
       </div>`).join('');
 }
 
+/**
+ * 上传进度：进度条 + 百分比 / 已传字节 / 实时网速 / 预计剩余。
+ * 数据由 app.js 算好（loaded / total / speed / eta），这里只负责画。
+ *
+ * @param {null | {state: 'running'|'done'|'error', loaded: number, total: number,
+ *                 speed: number, eta: number|null, percent: number, detail?: string}} data
+ */
+export function renderUploadProgress(data) {
+  const box = $('#upload-progress');
+  if (!box) return;
+
+  if (!data || data.state === 'idle') {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  box.classList.toggle('is-done', data.state === 'done');
+  box.classList.toggle('is-error', data.state === 'error');
+
+  const percent = Math.max(0, Math.min(100, Number(data.percent) || 0));
+  $('#progress-bar').style.width = `${percent}%`;
+  const track = box.querySelector('.progress');
+  if (track) track.setAttribute('aria-valuenow', String(Math.round(percent)));
+
+  $('#progress-percent').textContent = percent >= 99.95
+    ? '100%'
+    : `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
+  $('#progress-bytes').textContent = `${humanSize(data.loaded)} / ${humanSize(data.total)}`;
+  $('#progress-speed').textContent = data.speed > 0 ? `${humanSize(data.speed)}/s` : '– /s';
+
+  const eta = Number(data.eta);
+  $('#progress-eta').textContent = (Number.isFinite(eta) && eta > 0 && data.state === 'running')
+    ? `剩余约 ${eta >= 60 ? `${Math.round(eta / 60)} 分 ${Math.round(eta % 60)} 秒` : `${Math.ceil(eta)} 秒`}`
+    : '';
+  $('#progress-detail').textContent = data.detail || '';
+}
+
 /** 上传结果：results / summary 由服务端给出，原样展示 */
 export function renderUploadResult(payload) {
   const box = $('#upload-result');

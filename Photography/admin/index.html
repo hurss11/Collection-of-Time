@@ -214,6 +214,19 @@
               <span class="muted">选一张图片作为本批视频的封面；不选则抓取第一帧</span>
             </label>
             <button class="btn btn--primary" id="up-start" type="button" disabled>开始上传</button>
+            <div class="upload-progress" id="upload-progress" hidden>
+              <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                   aria-valuenow="0" aria-label="上传进度">
+                <div class="progress__bar" id="progress-bar"></div>
+              </div>
+              <div class="progress__meta">
+                <strong id="progress-percent">0%</strong>
+                <span id="progress-bytes">0 B / 0 B</span>
+                <span id="progress-speed">– /s</span>
+                <span id="progress-eta"></span>
+              </div>
+              <p class="muted" id="progress-detail"></p>
+            </div>
           </div>
         </div>
       </div>

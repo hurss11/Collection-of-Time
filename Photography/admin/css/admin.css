@@ -301,6 +301,44 @@
 .upload-summary.is-ok { color: var(--ok); }
 .upload-summary.is-warn { color: var(--warn); }
 
+/* 上传进度：进度条 + 百分比 / 已传字节 / 实时网速 / 预计剩余 */
+.upload-progress {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+}
+.progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress__bar {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--ok));
+  transition: width 0.15s linear;
+}
+.progress__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+.progress__meta strong { font-size: 14px; color: var(--text); }
+#progress-speed { color: var(--accent); }
+.upload-progress .muted { margin: 6px 0 0; font-size: 12.5px; }
+.upload-progress.is-done .progress__bar { background: var(--ok); }
+.upload-progress.is-error .progress__bar { background: var(--danger); }
+
 .result-item {
   border: 1px solid var(--border);
   border-radius: var(--radius);

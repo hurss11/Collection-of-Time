@@ -9,10 +9,10 @@
  * 服务端下发的 schema / 计数 / 工具信息（用于渲染，不是数据副本）。
  */
 
-import { api, setUnauthorizedHandler } from './api.js';
+import { api, setUnauthorizedHandler, uploadWithProgress } from './api.js';
 import * as auth from './auth.js';
 import { CONFIG, assetUrl } from './config.js';
-import { $, $$, clearFieldErrors, escapeHtml, modal, readForm, renderForm, showFieldErrors, toast } from './ui.js';
+import { $, $$, clearFieldErrors, escapeHtml, humanSize, modal, readForm, renderForm, showFieldErrors, toast } from './ui.js';
 import * as views from './views.js';
 import { EMPTY_TEXT, PANE_META } from './views.js';
 
@@ -308,6 +308,7 @@ function queueFiles(fileList) {
 
   state.selected.push(...files);
   views.renderQueue(state.selected);
+  views.renderUploadProgress(null);          // 换了待传列表，把上次的进度收起来
   $('#up-start').disabled = false;
 }
 
@@ -329,6 +330,30 @@ function makeBatches(files, maxBatchBytes) {
   }
   if (current.length) batches.push(current);
   return batches;
+}
+
+/**
+ * 网速表：只用最近 2 秒的采样算速度，避免瞬时抖动让数字乱跳。
+ * update() 返回当前速度（字节/秒）；返回 0 表示样本还太少。
+ */
+function speedMeter(windowMs = 2000) {
+  let samples = [];
+  return {
+    reset() {
+      samples = [];
+    },
+    update(loaded) {
+      const now = performance.now();
+      const previous = samples[samples.length - 1];
+      // 已发送字节回落说明这一批在重发（例如 CSRF 过期后的重试），旧样本作废
+      if (previous && loaded < previous.loaded) samples = [];
+      samples.push({ at: now, loaded });
+      while (samples.length > 2 && now - samples[0].at > windowMs) samples.shift();
+      const first = samples[0];
+      const seconds = (now - first.at) / 1000;
+      return seconds >= 0.25 ? (loaded - first.loaded) / seconds : 0;
+    },
+  };
 }
 
 async function startUpload() {
@@ -356,6 +381,31 @@ async function startUpload() {
   const results = [];
   const summary = { total: 0, ok: 0, failed: 0 };
 
+  // 进度口径：分母按「实际发出的字节」算——封面图每批都会带一张
+  const filesBytes = state.selected.reduce((sum, file) => sum + file.size, 0);
+  const coverBytes = cover ? cover.size * groups.length : 0;
+  const totalBytes = Math.max(filesBytes + coverBytes, 1);
+  const meter = speedMeter();
+  const startedAt = performance.now();
+  let sentBytes = 0;                 // 已完成批次的实际字节
+  let serverBusy = false;            // 本批已发完，等在服务端处理
+
+  const paint = (loaded, detail = '') => {
+    const speed = meter.update(loaded);
+    const percent = (loaded / totalBytes) * 100;
+    views.renderUploadProgress({
+      state: 'running',
+      loaded,
+      total: totalBytes,
+      percent,
+      speed,
+      eta: speed > 0 ? (totalBytes - loaded) / speed : null,
+      detail,
+    });
+    setHint(`上传中 ${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`
+      + ` · ${speed > 0 ? `${humanSize(speed)}/s` : '计算网速中…'}`);
+  };
+
   try {
     for (const [index, group] of groups.entries()) {
       const form = new FormData();
@@ -365,9 +415,25 @@ async function startUpload() {
       // 选了封面图片就带上：服务端把它作为本批视频的封面（否则抓第一帧）
       if (cover) form.append('posterFile', cover, cover.name);
 
-      setHint(`正在上传第 ${index + 1} / ${groups.length} 批…`);
-      const payload = await api.upload('/api/upload', form);
+      const batchBytes = group.reduce((sum, file) => sum + file.size, 0) + (cover ? cover.size : 0);
+      const names = group.map((file) => file.name).join('、');
+      const batchLabel = groups.length > 1 ? `第 ${index + 1}/${groups.length} 批` : '本批';
+      const detail = () => (serverBusy
+        ? `${batchLabel}已发送完毕，服务端处理中…（${names}）`
+        : `${batchLabel} · ${group.length} 个文件 · ${names}`);
+      serverBusy = false;
+      meter.reset();
+      paint(sentBytes, detail());
 
+      const payload = await uploadWithProgress('/api/upload', form, {
+        onProgress: ({ loaded }) => paint(sentBytes + loaded, detail()),
+        onSent: () => {
+          serverBusy = true;
+          paint(sentBytes + batchBytes, detail());
+        },
+      });
+
+      sentBytes += batchBytes;
       results.push(...(payload.results || []));
       const batch = payload.summary || {};
       summary.total += batch.total ?? 0;
@@ -375,11 +441,35 @@ async function startUpload() {
       summary.failed += batch.failed ?? 0;
     }
 
+    // 收尾：给一个「总耗时 + 平均速度」的结果，而不是让进度条停在 99%
+    const seconds = (performance.now() - startedAt) / 1000;
+    const average = seconds > 0 ? totalBytes / seconds : 0;
+    views.renderUploadProgress({
+      state: 'done',
+      loaded: totalBytes,
+      total: totalBytes,
+      percent: 100,
+      speed: average,
+      eta: null,
+      detail: `共 ${humanSize(totalBytes)}，用时 ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`
+        + `，平均 ${humanSize(average)}/s`,
+    });
+    setHint('');                       // 别把「上传中 xx%」留在顶栏
+
     views.renderUploadResult({ results, summary });
     toast(`上传结束：成功 ${summary.ok} / ${summary.total}`, summary.failed ? 'warn' : 'ok');
   } catch (error) {
     toast(`上传失败：${error.message}`, 'err', 6000);
     setHint(error.message, 'err');
+    views.renderUploadProgress({
+      state: 'error',
+      loaded: sentBytes,
+      total: totalBytes,
+      percent: (sentBytes / totalBytes) * 100,
+      speed: 0,
+      eta: null,
+      detail: `已中断：${error.message}`,
+    });
     if (results.length) views.renderUploadResult({ results, summary });
   } finally {
     state.selected = [];

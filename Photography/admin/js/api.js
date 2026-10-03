@@ -114,6 +114,82 @@ export async function request(path, options = {}) {
   throw new ApiError(message, response.status, { ...payload, retryAfter });
 }
 
+/**
+ * 带进度的 POST（multipart）。
+ *
+ * `fetch` 没有上传进度事件，所以这里用 XMLHttpRequest——`xhr.upload.progress`
+ * 会随发送过程持续回调 { loaded, total }。错误语义与 request() 保持一致。
+ *
+ * @param {string} path 以 /api 开头的路径
+ * @param {FormData} form
+ * @param {{onProgress?: (state: {loaded: number, total: number}) => void, onSent?: () => void}} [hooks]
+ * @returns {Promise<object>} 同 request()：解析后的 JSON
+ */
+export function uploadWithProgress(path, form, hooks = {}) {
+  return sendUpload(path, form, hooks, true);
+}
+
+/** uploadWithProgress 的实现；retry 用于 CSRF Cookie 过期后刷新会话再重试一次。 */
+function sendUpload(path, form, hooks, retry) {
+  const { onProgress, onSent } = hooks;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', apiUrl(path), true);
+    xhr.withCredentials = true;                    // 带上 HttpOnly 会话 Cookie
+
+    const csrf = readCookie(CONFIG.csrfCookie);
+    if (csrf) xhr.setRequestHeader(CONFIG.csrfHeader, csrf);
+
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (event) => {
+        onProgress({
+          loaded: event.loaded,
+          total: event.lengthComputable ? event.total : 0,
+        });
+      });
+    }
+    if (onSent) {
+      // 请求体发完 ≠ 处理完：之后是服务端在读 EXIF / 生成缩略图与封面
+      xhr.upload.addEventListener('load', () => onSent());
+    }
+
+    const fail = (message, status = 0, payload = null) => reject(new ApiError(message, status, payload));
+
+    xhr.addEventListener('load', () => {
+      let payload = null;
+      try {
+        payload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        fail(`响应不是 JSON（HTTP ${xhr.status}）`, xhr.status, { text: String(xhr.responseText).slice(0, 200) });
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && payload?.ok !== false) {
+        resolve(payload);
+        return;
+      }
+      const message = payload?.error || `HTTP ${xhr.status}`;
+
+      // 与 request() 保持一致：CSRF Cookie 过期（页面开了很久）时刷新会话后自动重试一次
+      if (xhr.status === 403 && retry && /CSRF/i.test(message)) {
+        fetch(apiUrl('/api/auth/session'), { credentials: 'same-origin' })
+          .catch(() => { /* 刷新失败就让下面的重试去暴露真实错误 */ })
+          .then(() => resolve(sendUpload(path, form, hooks, false)));
+        return;
+      }
+
+      const retryAfter = Number(xhr.getResponseHeader('Retry-After') ?? 0) || 0;
+      if (xhr.status === 401) onUnauthorized();
+      fail(message, xhr.status, { ...payload, retryAfter });
+    });
+    xhr.addEventListener('error', () => fail('无法连接后端服务，请确认服务已启动', 0));
+    xhr.addEventListener('abort', () => fail('上传已取消', 0));
+    xhr.addEventListener('timeout', () => fail('上传超时，请检查网络', 0));
+
+    xhr.send(form);
+  });
+}
+
 export const api = {
   get: (path, options) => request(path, { ...options, method: 'GET' }),
   post: (path, json, options) => request(path, { ...options, method: 'POST', json }),
