@@ -36,7 +36,7 @@ export const CONFIG = {
   csrfHeader: 'X-CSRF-Token',
 
   /** 前端版本号，显示在登录页页脚，便于确认部署的是哪一版 */
-  version: '1.1.0',
+  version: '2.0.0',
 };
 
 /** 拼接接口地址 */

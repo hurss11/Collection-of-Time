@@ -103,6 +103,7 @@
           <small id="current-user-since"></small>
         </span>
       </div>
+      <button class="ghost-btn ghost-btn--block" id="btn-change-password-side" type="button">修改密码</button>
       <a class="ghost-btn ghost-btn--block" href="/" target="_blank" rel="noopener">打开站点 ↗</a>
     </div>
   </aside>
@@ -136,7 +137,9 @@
     <!-- ---------- 照片 / 视频 ---------- -->
     <section class="pane" data-pane="photos">
       <div class="toolbar">
-        <input class="input" id="search-photos" type="search" placeholder="筛选标题 / 相册 / 标签…" />
+        <input class="input toolbar__search" id="search-photos" type="search"
+               placeholder="搜索标题 / 相册 / 标签…（服务端搜索）" />
+        <select class="input toolbar__sort" id="sort-photos" aria-label="排序"></select>
         <button class="btn" data-action="add" data-collection="photos" type="button">＋ 新增照片</button>
       </div>
       <div class="table-wrap"><table class="table" id="table-photos"></table></div>
@@ -144,7 +147,9 @@
 
     <section class="pane" data-pane="videos">
       <div class="toolbar">
-        <input class="input" id="search-videos" type="search" placeholder="筛选标题 / 来源 / 标签…" />
+        <input class="input toolbar__search" id="search-videos" type="search"
+               placeholder="搜索标题 / 来源 / 标签…（服务端搜索）" />
+        <select class="input toolbar__sort" id="sort-videos" aria-label="排序"></select>
         <button class="btn" data-action="add" data-collection="videos" type="button">＋ 新增视频</button>
       </div>
       <div class="table-wrap"><table class="table" id="table-videos"></table></div>
@@ -153,9 +158,12 @@
     <!-- ---------- 相册 ---------- -->
     <section class="pane" data-pane="albums">
       <div class="toolbar">
-        <span class="muted">相册的 id 会被照片 / 视频的 <code>album</code> 字段引用，修改 id 不会自动更新引用。</span>
+        <input class="input toolbar__search" id="search-albums" type="search"
+               placeholder="搜索相册…（服务端搜索）" />
+        <select class="input toolbar__sort" id="sort-albums" aria-label="排序"></select>
         <button class="btn" data-action="add" data-collection="albums" type="button">＋ 新增相册</button>
       </div>
+      <p class="muted toolbar-note">相册的 id 会被照片 / 视频的 <code>album</code> 字段引用，修改 id 不会自动更新引用。</p>
       <div class="table-wrap"><table class="table" id="table-albums"></table></div>
     </section>
 
@@ -164,12 +172,12 @@
       <div class="upload-grid">
         <div class="card">
           <h2 class="card__title">选择文件</h2>
-          <div class="dropzone" id="dropzone" tabindex="0">
+          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择要上传的文件">
             <input id="file-input" type="file" multiple hidden
                    accept=".jpg,.jpeg,.png,.webp,.avif,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi" />
             <span class="dropzone__glyph">↑</span>
             <p><strong>把文件拖到这里</strong>，或点击选择</p>
-            <p class="muted">支持 JPG / PNG / WebP / TIFF 与 MP4 / MOV / WebM / MKV，可多选</p>
+            <p class="muted">支持 JPG / PNG / WebP / TIFF 与 MP4 / MOV / WebM / MKV，可多选；服务端按批处理</p>
           </div>
           <div class="queue" id="queue"></div>
         </div>
@@ -199,13 +207,19 @@
             </label>
             <label class="check"><input type="checkbox" id="up-exif" checked /> 图片：自动读取 EXIF 填充参数</label>
             <label class="check"><input type="checkbox" id="up-thumb" checked /> 图片：用 ffmpeg 生成缩略图（800px）</label>
-            <label class="check"><input type="checkbox" id="up-poster" checked /> 视频：用 ffmpeg 抓帧生成封面</label>
+            <label class="check"><input type="checkbox" id="up-poster" checked /> 视频：未指定封面时自动抓取第一帧</label>
+            <label class="field">
+              <span>视频封面（可选）</span>
+              <input class="input" id="up-cover" type="file" accept="image/*" />
+              <span class="muted">选一张图片作为本批视频的封面；不选则抓取第一帧</span>
+            </label>
             <button class="btn btn--primary" id="up-start" type="button" disabled>开始上传</button>
           </div>
         </div>
       </div>
       <div class="card" id="upload-result" hidden>
         <h2 class="card__title">上传结果</h2>
+        <p class="upload-summary" id="upload-result-summary"></p>
         <div id="upload-result-body"></div>
       </div>
     </section>

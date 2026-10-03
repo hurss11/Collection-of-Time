@@ -2,7 +2,8 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="api-base" content="" />
   <title>Collection of Time · 摄影作品集</title>
   <meta name="description" content="一个轻量的摄影作品集：相册分类浏览、标签搜索、EXIF 元数据与灯箱大图。" />
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
@@ -39,7 +40,7 @@
         并保留完整的拍摄参数（EXIF）。
       </p>
       <dl class="hero__stats" id="hero-stats">
-        <div><dt>作品</dt><dd data-stat="photos">–</dd></div>
+        <div><dt>作品</dt><dd data-stat="works">–</dd></div>
         <div><dt>相册</dt><dd data-stat="albums">–</dd></div>
         <div><dt>标签</dt><dd data-stat="tags">–</dd></div>
       </dl>
@@ -55,12 +56,8 @@
         </label>
         <label class="select">
           <span>排序</span>
-          <select id="sort-select">
-            <option value="date-desc">拍摄时间（新 → 旧）</option>
-            <option value="date-asc">拍摄时间（旧 → 新）</option>
-            <option value="title-asc">标题（A → Z）</option>
-            <option value="album">相册分组</option>
-          </select>
+          <!-- 选项由 /api/public/site 的 sorts 渲染 -->
+          <select id="sort-select" aria-label="排序方式"></select>
         </label>
       </div>
 
@@ -99,6 +96,10 @@
         <span class="empty-state__glyph">⌀</span>
         没有符合条件的作品，试试更换关键词或重置筛选。
       </p>
+      <div class="load-more-wrap">
+        <!-- 是否还有下一页由服务端 meta.hasMore 决定 -->
+        <button id="load-more" class="ghost-btn load-more" type="button" hidden>加载更多作品</button>
+      </div>
       <template id="skeleton-template">
         <div class="card card--skeleton" aria-hidden="true">
           <div class="card__media"></div>
@@ -113,7 +114,7 @@
 
   <footer class="site-footer">
     <p>© <span id="year"></span> Collection of Time · 用静态 HTML / CSS / JavaScript 构建</p>
-    <p class="site-footer__hint">提示：在本地通过 <code>python serve.py</code> 启动服务后访问，可正常读取 JSON 与 EXIF。</p>
+    <p class="site-footer__hint">提示：作品数据、筛选排序与 EXIF 均由只读接口 <code>/api/public/*</code> 提供，请通过 <code>python serve.py</code> 或 <code>python admin.py</code> 启动后访问。</p>
   </footer>
 
   <!-- ============ 灯箱 ============ -->
@@ -136,8 +137,11 @@
         <div class="lightbox__headline">
           <h3 id="lb-title"></h3>
           <p id="lb-subtitle"></p>
+          <p id="lb-description"></p>
+          <p id="lb-meta"></p>
         </div>
         <div class="lightbox__panel">
+          <p class="lightbox__status" id="lb-status" hidden></p>
           <div class="exif" id="lb-exif"></div>
           <button class="ghost-btn" id="lb-exif-parse" type="button">解析原文件 EXIF</button>
         </div>

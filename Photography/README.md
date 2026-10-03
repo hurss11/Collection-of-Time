@@ -1,8 +1,13 @@
 # Collection of Time · Photography
 
-一个**零依赖**的静态摄影作品集框架：原生 HTML / CSS / JavaScript（ES Module），
+一个**零依赖**的摄影作品集框架：后端只用 Python 标准库提供 JSON API，
+前端只负责渲染（原生 HTML / CSS / JavaScript ES Module），
 内置相册分类浏览、标签搜索筛选、EXIF 元数据展示与灯箱大图查看，
 并支持**照片与视频混合浏览**（本地视频文件 + YouTube / 哔哩哔哩 / Vimeo 外链嵌入）。
+
+> **架构取向：逻辑在后端，前端只渲染。**
+> 搜索、筛选、排序、分页、校验、EXIF 解析与格式化、表单字段定义、上传调度
+> 全部由 Python 端完成，浏览器端不含这些业务规则（详见「前后端契约」一节）。
 
 ---
 
@@ -13,8 +18,15 @@ cd CollectionOfTime/Photography
 python serve.py          # 默认 http://127.0.0.1:8000，会自动打开浏览器
 ```
 
-> 也可以使用其它任意静态服务器：`python -m http.server 8000`、`npx serve` 等。
-> **不要直接双击 `index.html`**：`file://` 协议下浏览器会拦截 `fetch`，数据与 EXIF 都无法加载。
+> `serve.py` 既是静态服务器，也提供与正式后台**完全相同**的公开只读接口
+> （`/api/public/*`），所以单独预览作品集只需要它一个。
+> 用 `admin.py` 启动时同样自带这些接口。
+>
+> ⚠️ 作品集的数据现在由后端接口提供，**不再直接读取 `data/*.json`**，
+> 因此纯静态服务器（`python -m http.server`、`npx serve`、GitHub Pages 等）
+> 无法完整呈现列表与筛选——请用 `serve.py`，或把静态目录与 `/api/public/*`
+> 放在同一个源下（例如同一台 nginx 反代到 `admin.py`）。
+> 另外**不要直接双击 `index.html`**：`file://` 协议下浏览器会拦截 `fetch`。
 
 ---
 
@@ -200,8 +212,10 @@ cd /opt/photography && ./run.sh doctor
 
 一个**只用 Python 标准库**的内容后台，采用前后端分离结构：
 
-- **后端** `admin.py`：只提供 JSON API 与（可选的）静态资源，负责认证、校验与落盘；
-- **前端** `admin/`：纯静态的 SPA，通过 `fetch` 调 API，可独立部署。
+- **后端** `admin.py` + `adminlib/`：提供 JSON API 与（可选的）静态资源，
+  并承担全部业务逻辑——搜索/筛选/排序/分页（`adminlib/query.py`）、
+  表单字段定义与字段级校验（`adminlib/schema.py`）、认证、上传与落盘；
+- **前端** `admin/`：纯静态的薄客户端，只做三件事——取值、拼 HTML、绑事件。可独立部署。
 
 服务器上不需要 `pip install` 任何东西。
 
@@ -220,9 +234,9 @@ python admin.py --print-systemd       # 生成 systemd 单元文件
 | --- | --- |
 | 概览 | 条目计数、FFmpeg 状态、**数据完整性体检**（失效相册引用 / 缺失媒体文件）、最近操作 |
 | 照片 / 视频 / 相册 | 列表筛选、新增、编辑（含 EXIF 分组表单）、删除（可选同时删除媒体文件） |
-| 上传 | 拖拽或点选多文件、指定相册与标签、**自动读取 EXIF 填充拍摄参数**、ffmpeg 生成缩略图与视频封面 |
+| 上传 | 拖拽或点选多文件、**一次请求批量上传**、指定相册与标签、**自动读取 EXIF 填充拍摄参数**、ffmpeg 生成缩略图，视频默认抓取第一帧作为封面（也可直接上传封面图片） |
 | 备份 | 一键导出 JSON、导入（覆盖 / 按 id 合并）、回滚任意一次自动备份 |
-| 账号 | 修改密码、退出登录、会话信息 |
+| 账号 | 修改密码（侧边栏用户卡片也有入口）、退出登录、会话信息 |
 
 ### 登录与认证
 
@@ -271,7 +285,19 @@ ADMIN_PASSWORD='新密码' ./run.sh reset-password        # 非交互
 python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 ```
 
-主要接口：
+主要接口（完整字段说明见「前后端契约」一节）：
+
+**公开只读接口（无需登录，作品集前端使用）**
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/public/site` | 首屏：统计、相册总览、筛选项（相册/标签聚合）、排序与类型选项 |
+| `GET /api/public/gallery` | 作品列表；`q` / `type` / `album` / `tags` / `sort` / `page` / `pageSize` 全在服务端处理 |
+| `GET /api/public/albums` | 相册总览（含条目数与封面兜底） |
+| `GET /api/public/exif?path=…` | 解析原文件 EXIF（取代浏览器端解析器；仅限照片目录） |
+| `GET /api/health` | 健康检查 |
+
+**后台接口（需要会话，写操作另需 CSRF 头）**
 
 | 接口 | 说明 |
 | --- | --- |
@@ -280,15 +306,50 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | `POST /api/auth/login` | 登录 |
 | `POST /api/auth/logout` | 退出 |
 | `POST /api/auth/password` | 修改密码 |
-| `GET /api/state` | 概览：计数、工具状态、完整性体检、备份列表、操作记录 |
-| `GET /api/data/{albums\|photos\|videos}` | 读取集合 |
-| `PUT /api/data/{集合}` | 整表替换 |
-| `POST /api/data/{集合}` | 新增 / 按 id 覆盖单条 |
-| `DELETE /api/data/{集合}/{id}[/file]` | 删除条目；加 `/file` 同时删除媒体文件 |
-| `POST /api/upload` | multipart 上传（自动 EXIF / 缩略图 / 视频封面） |
+| `GET /api/schema` | 表单字段定义、排序项、列定义、上传限制（前端不再内置这些） |
+| `GET /api/items/{集合}` | 表格数据：`q` / `album` / `tag` / `sort` / `page` / `pageSize` 服务端处理，返回**已算好**的单元格 |
+| `GET /api/item/{集合}/{id}` | 单条详情，`values` 为已摊平的表单值，直接填控件 |
+| `POST /api/items/{集合}` | 新增 / 编辑；校验失败返回 400 + `fieldErrors[{field,message}]` |
+| `DELETE /api/items/{集合}/{id}[/file]` | 删除条目；加 `/file` 同时删除媒体文件 |
+| `POST /api/upload` | **批量**上传（字段 `files` 可重复；可另带 `posterFile` 作为本批视频的封面）；逐文件返回结果，失败不影响其它文件 |
+| `POST /api/videos/{id}/poster` | 为某个视频设置封面：上传图片（`file`）或抓帧（`time`，默认 0 = 第一帧） |
+| `GET /api/upload/options` | 上传限制（单文件 / 单批上限）、可选相册、允许的扩展名 |
+| `GET /api/state` | 概览：计数、工具状态、完整性体检、备份列表（含 `sizeText`）、操作记录 |
+| `GET /api/data/{集合}`、`PUT /api/data/{集合}`、`POST /api/data/{集合}` | 兼容保留的集合读写（整表替换 / 单条覆盖） |
 | `GET /api/backups`、`POST /api/backups/{名称}/restore` | 列出 / 恢复备份 |
 | `GET /api/export`、`POST /api/import` | 导出 / 导入 JSON |
-| `GET /api/health` | 健康检查（无需登录） |
+
+### 前后端契约（薄客户端）
+
+前端不含业务规则，只按后端返回的结构渲染。三条约定：
+
+1. **列表都是「已算好」的单元格**。`GET /api/items/{集合}` 返回 `columns[]`（表头）与
+   `items[].cells[]`，每个单元格自带 `kind`，前端只按 `kind` 分发渲染：
+
+   | `kind` | 渲染方式 |
+   | --- | --- |
+   | `thumb` | `remoteUrl` 或 `url` 作 `<img>`；`missing` / 空值显示 `fallback` 角标 |
+   | `title` | 主标题 `text` + 次行 `sub` |
+   | `text` / `sub` / `muted` | 文本（普通 / 次要 / 灰色） |
+   | `tags` | 标签组 |
+   | `badge` | 徽章（`tone` 为 `file` / `embed`） |
+   | `actions` | 编辑 / 删除按钮，值为 `"{集合}:{id}"` |
+
+   因此前端**没有**按集合分叉的渲染代码——手机端的卡片布局也复用同一份数据。
+
+2. **表单定义与校验在后端**。`GET /api/schema` 给出字段（`key` / `label` / `type` /
+   `required` / `group` / `hint` / `placeholder`）；`GET /api/item/{集合}/{id}` 给出的
+   `values` 是**已摊平**的（`exif.camera` 这种扁平键可直接塞进控件）；
+   提交时把控件原始值原样 POST 回去，后端负责还原嵌套、类型转换与校验，
+   校验失败返回 `400 { ok:false, fieldErrors:[{field,message}] }`，前端按 `field` 标红。
+
+3. **公开端同理**。`/api/public/gallery` 已经把搜索、相册/标签/类型筛选、排序、分页
+   做完，并返回可直接展示的 `subtitle` / `dateText` / `durationText` / `exifSummary` /
+   `imageMissing` / `embedUrl` 等字段，前端不再拼这些文案。
+
+上传也是「后端调度、前端展示」：`POST /api/upload` 一次可带多个 `files`，
+返回 `results[]`（逐个文件的成功/失败与 `warnings`）与 `summary`，
+前端只需按 `upload.maxBatchBytes` 分批发送并渲染结果。
 
 ### 安全模型
 
@@ -296,9 +357,12 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 
 - 默认只监听 `127.0.0.1`，外部访问不到；
 - 除公开接口外，所有 API 都要求有效会话；
-- 上传有扩展名白名单、单文件 512MB 上限；
+- 上传有扩展名白名单、单文件 512MB 上限、单批 480MB 上限；
 - 删除文件前会做路径越界校验，只允许删 `assets/` 下的对应目录；
 - 静态资源与 `/admin` 资源都做了路径穿越防护；
+- 静态文件走白名单：只有站点根目录的 `index.html` / `favicon.svg` 与 `assets/`、`data/`
+  下的文件会对外提供，后端源码、`adminlib/`、`admin.config.json`（含会话密钥）与
+  `data/.backups/` 一律返回 404；
 - `--no-auth` 只在监听本机时才允许使用（本地调试用）。
 
 ### 服务器部署
@@ -377,26 +441,28 @@ sudo ./run.sh systemd --install
 ```
 Photography/
 ├── index.html                # 站点入口页：结构 + 灯箱骨架
-├── admin.py                  # 后台后端：JSON API + 认证 + 上传 + 落盘
-├── serve.py                  # 纯静态预览服务器
+├── admin.py                  # 后端：公开只读 + 后台 API，认证、上传、落盘
+├── serve.py                  # 本地预览服务器：静态文件 + 公开只读接口
 ├── run.sh                    # 一键运行（自检 / 装 FFmpeg / 打包 / 启动 / 日志）
 ├── DEPLOY.md                 # 部署到服务器的完整手册（随迁移包分发）
 ├── admin.config.json         # 管理员账号与会话密钥（0600 权限，已 gitignore）
-├── adminlib/                 # 后台的服务端模块
+├── adminlib/                 # 后端模块
 │   ├── auth.py               # 密码哈希、签名会话、CSRF、登录限流
 │   ├── store.py              # JSON 读写、校验、原子写入、自动备份
+│   ├── query.py              # 搜索 / 筛选 / 排序 / 分页 + 展示投影（公开端与后台共用）
+│   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
 │   ├── exifread.py           # 标准库 JPEG EXIF 解析
 │   └── media.py              # ffmpeg / ffprobe 封装与多位置探测（可选）
-├── admin/                    # 后台前端（纯静态 SPA，可独立部署）
+├── admin/                    # 后台前端（薄客户端：只渲染）
 │   ├── index.html            # 登录视图 + 后台视图
 │   ├── css/{base.css, login.css, admin.css}
 │   └── js/
 │       ├── config.js         # 接口地址等运行时配置
 │       ├── api.js            # API 客户端（凭证 / CSRF / 错误处理）
 │       ├── auth.js           # 登录、建号、改密、登出
-│       ├── ui.js             # DOM 工具、提示、弹窗、表单
-│       ├── views.js          # 纯渲染函数
-│       └── app.js            # 状态与事件装配
+│       ├── ui.js             # DOM 工具、提示、弹窗
+│       ├── views.js          # 纯渲染函数（按 cell.kind 分发）
+│       └── app.js            # 事件装配与取数调度
 ├── tools/
 │   ├── make_posters.py       # 用 ffmpeg 批量生成视频封面
 │   └── fetch_ffmpeg.py       # 下载 / 校验 / 安装 FFmpeg 静态构建到 bin/
@@ -408,7 +474,7 @@ Photography/
 │   └── .backups/             # 保存前自动生成的备份（已 gitignore）
 ├── assets/
 │   ├── css/{main.css, lightbox.css}
-│   ├── js/{app.js, data.js, search.js, gallery.js, lightbox.js, poster.js, exif.js}
+│   ├── js/                   # 作品集前端：取数、渲染、灯箱（薄客户端）
 │   ├── img/                  # 照片资源（当前为 SVG 占位图）
 │   └── video/                # 视频资源，详见 assets/video/README.md
 ├── .run/                     # 运行状态：admin.pid、admin.log（已 gitignore）
@@ -420,15 +486,17 @@ Photography/
 
 ```mermaid
 graph TD
-  app[app.js] --> data[data.js]
-  app --> search[search.js]
-  app --> gallery[gallery.js]
-  app --> lightbox[lightbox.js]
-  app --> poster[poster.js]
+  app[app.js 取数与事件装配] --> data[data.js 公开 API 客户端]
+  app --> gallery[gallery.js 卡片/相册/chips 渲染]
+  app --> lightbox[lightbox.js 灯箱]
   gallery --> data
   lightbox --> data
-  lightbox --> exif[exif.js]
+  lightbox --> exif[exif.js 原文件 EXIF]
+  exif --> data
 ```
+
+> 三个渲染模块都不含业务规则：过滤、排序、分页、统计、EXIF 文案与解析都在后端。
+> 浏览器只把 `/api/public/*` 返回的结构画出来。
 
 ---
 
@@ -495,9 +563,11 @@ graph TD
   工具栏「类型」chips 可一键只看照片或只看视频。
 - **两种播放方式**：本地文件用原生 `<video controls>`；外链用 `<iframe>` 嵌入播放器，
   自动转换链接格式。切换媒体时会自动暂停并卸载上一个播放器，避免后台继续播放。
-- **自动封面**（二选一）：
-  - 预生成：`python tools/make_posters.py` 用 ffmpeg 抓帧，加载最快；
-  - 运行时：`poster` 留空，`assets/js/poster.js` 在卡片进入视口时定位到 `posterTime` 秒显示该帧。
+- **视频封面**：
+  - 上传本地视频时，若勾选「自动抓取第一帧」且未指定封面，后端用 ffmpeg 抓取**第 0 秒（第一帧）**；
+  - 上传时也可以直接附带一张封面图片（上传面板的「视频封面（可选）」），优先级高于抓帧；
+  - 列表里每行视频都有「封面」按钮：可随时**上传图片**或**按指定秒数重新抓帧**；
+  - 批量补封面用 `python tools/make_posters.py`。前端不做客户端抓帧。
 - **视频参数面板**：灯箱中展示来源、时长、分辨率、帧率、编码、设备与地点。
 - **键盘**：`Esc` 关闭、`←` `→` 翻页；当播放器或表单控件获得焦点时，方向键让给控件自身
   （便于拖动进度条）。
@@ -513,8 +583,10 @@ graph TD
 2. 在 `data/photos.json` 中追加一条记录，填写 `src` / `thumb` / `tags` / `exif`。
 3. 刷新页面即可，**无需任何构建步骤**。
 
-灯箱中的「解析原文件 EXIF」按钮会真正读取 JPEG 的 APP1 段（`assets/js/exif.js`），
+灯箱中的「解析原文件 EXIF」按钮会请求后端解析 JPEG 的 APP1 段
+（`GET /api/public/exif`，复用 `adminlib/exifread.py`），
 因此即使 JSON 里没写 EXIF，也能从原图里解析出相机、快门、光圈、ISO 等参数。
+出于安全考虑，该接口**只允许解析 `assets/img/photos/` 下的文件**。
 
 ## 新增一段视频
 
@@ -535,8 +607,9 @@ graph TD
 - **排序**：拍摄时间升降序、标题字典序、相册分组。
 - **灯箱**：照片与视频统一查看，键盘 `Esc` / `←` / `→`、点击图片两侧翻页、
   相邻媒体预加载、焦点陷阱。
-- **EXIF 展示**：优先使用 JSON 中的数据，可按需从原图实时解析。
-- **视频自动封面**：预生成与运行时抓帧两条路径。
+- **EXIF 展示**：优先使用 JSON 中的数据，按需由后端从原图解析（`/api/public/exif`）。
+- **视频封面**：由后端生成（上传时自动抓帧 / `tools/make_posters.py` 批量补），
+  未设置封面的本地视频会在后台「数据完整性」中列出。
 - **主题切换**：深色 / 浅色，写入 `localStorage` 记忆。
 - **快捷键**：`/` 聚焦搜索框。
 - **响应式与无障碍**：移动端自适应网格、`aria-pressed` 状态、`prefers-reduced-motion` 支持。

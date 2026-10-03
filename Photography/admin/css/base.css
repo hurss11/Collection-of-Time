@@ -173,8 +173,15 @@ a { color: var(--accent); }
   transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }
 .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input.is-invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
 textarea.input { resize: vertical; font-family: inherit; }
 select.input { cursor: pointer; }
+
+/* 服务端下发的字段级错误（fieldErrors） */
+.field__error { font-size: 11.5px; color: var(--danger); }
 
 /* ============================================================
    表单
@@ -264,7 +271,16 @@ legend { font-size: 12px; color: var(--text-mute); padding: 0 6px; }
    提示
    ============================================================ */
 
-.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 80; display: grid; gap: 8px; }
+.toasts {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 80;
+  display: grid;
+  gap: 8px;
+  /* 提示只是“看”的：必须让点击穿透，否则窄屏下它会盖住弹窗底部的“保存”按钮 */
+  pointer-events: none;
+}
 .toast {
   padding: 10px 15px;
   border: 1px solid var(--border);
@@ -283,4 +299,44 @@ legend { font-size: 12px; color: var(--text-mute); padding: 0 6px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ============================================================
+   窄屏：弹窗变成全屏抽屉（单列字段 + 固定操作区）
+   ============================================================ */
+
+@media (max-width: 860px) {
+  /* 关键：网格行必须显式限制在视口内。默认 auto 行会被内容撑开，
+     此时 .modal__box 的 height:100% 失效（百分比对 auto 行无意义），
+     弹窗会长出屏幕且无法滚动，底部「保存」按钮点不到。 */
+  .modal { padding: 0; grid-template-rows: minmax(0, 1fr); }
+  .modal__box {
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+  }
+  .modal__head { padding: 10px 14px; }
+  .modal__head h2 { font-size: 16px; }
+  .modal__body { padding: 14px; -webkit-overflow-scrolling: touch; }
+  .modal__foot {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg-elev);
+  }
+  .modal__foot .muted { display: none; }
+  .modal__foot .row { width: 100%; }
+  .modal__foot .row .btn { flex: 1; min-height: 44px; }
+  .icon-btn { width: 44px; height: 44px; }
+
+  .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .input, select.input, textarea.input { font-size: 16px; }   /* iOS：避免聚焦时页面放大 */
+  .input { min-height: 44px; }                                /* 触摸目标 ≥44px */
+
+  .toasts { left: 12px; right: 12px; bottom: 12px; }
+  .toast { max-width: none; }
 }

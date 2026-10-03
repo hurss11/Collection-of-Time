@@ -5,6 +5,14 @@
  *   - 只负责「发请求 / 收 JSON / 带上凭证与 CSRF / 统一错误」；
  *   - 不碰 DOM，也不持业务状态——DOM 交给 ui.js，业务交给 app.js。
  *
+ * 后台的数据接口是「薄客户端」契约：
+ *   /api/schema            字段 / 列 / 排序 / 上传限制
+ *   /api/items/{c}         列表（搜索 q、相册 album、标签 tag、排序 sort、分页 page）
+ *   /api/item/{c}/{id}     单条（values 已摊平，直接填表单）
+ *   /api/items/{c}  POST   保存（扁平值，服务端归一化 + 校验）
+ *   /api/items/{c}/{id}    删除
+ *   /api/upload            multipart 批量上传（字段名 files 可重复）
+ *
  * 认证方式：HttpOnly Cookie 会话（浏览器自动携带，JS 读不到令牌本身），
  * 写操作额外带上从可读 Cookie 中取出的 CSRF 值做双提交校验。
  */
@@ -28,6 +36,17 @@ export function setUnauthorizedHandler(handler) {
 }
 
 const MUTATING = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
+
+/** 把参数对象拼成查询串（跳过空值） */
+function queryString(params) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === '') continue;
+    search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : '';
+}
 
 /**
  * 发起一次 API 请求。
@@ -110,19 +129,24 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST', json: {} }),
   changePassword: (payload) => request('/api/auth/password', { method: 'POST', json: payload }),
 
-  /* ---------- 数据 ---------- */
+  /* ---------- 后台数据（搜索 / 排序 / 分页 / 归一化 / 校验都在服务端） ---------- */
+  schema: () => request('/api/schema', { method: 'GET' }),
   state: () => request('/api/state', { method: 'GET' }),
-  list: (collection) => request(`/api/data/${collection}`, { method: 'GET' }),
-  save: (collection, item) => request(`/api/data/${collection}`, { method: 'POST', json: item }),
-  replaceAll: (collection, items) =>
-    request(`/api/data/${collection}`, { method: 'PUT', json: { items } }),
-  remove: (collection, id, withFile = false) =>
-    request(`/api/data/${collection}/${encodeURIComponent(id)}${withFile ? '/file' : ''}`, {
+
+  items: (collection, params) =>
+    request(`/api/items/${encodeURIComponent(collection)}${queryString(params)}`, { method: 'GET' }),
+  item: (collection, id) =>
+    request(`/api/item/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { method: 'GET' }),
+  saveItem: (collection, values) =>
+    request(`/api/items/${encodeURIComponent(collection)}`, { method: 'POST', json: values }),
+  setPoster: (id, form) =>
+    request(`/api/videos/${encodeURIComponent(id)}/poster`, { method: 'POST', form }),
+  removeItem: (collection, id, withFile = false) =>
+    request(`/api/items/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${withFile ? '/file' : ''}`, {
       method: 'DELETE',
     }),
 
   /* ---------- 备份 ---------- */
-  backups: () => request('/api/backups', { method: 'GET' }),
   restore: (name) => request(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST', json: {} }),
   exportBundle: () => request('/api/export', { raw: true }),
   importBundle: (form) => request('/api/import', { method: 'POST', form }),

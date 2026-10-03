@@ -48,7 +48,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, store                      # noqa: E402
+from adminlib import auth, media, query, schema, store    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -61,11 +61,19 @@ CONFIG_PATH = ROOT / auth.CONFIG_NAME
 
 ALLOWED_UPLOAD_SUFFIXES = media.IMAGE_SUFFIXES | media.VIDEO_SUFFIXES
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024          # 单文件 512MB
+MAX_BATCH_BYTES = 480 * 1024 * 1024           # 一次批量上传的总体积上限（小于 MAX_BODY_BYTES 留余量）
 MAX_BODY_BYTES = MAX_UPLOAD_BYTES + 8 * 1024 * 1024
 HISTORY_KEEP = 60                             # 内存中保留的最近操作记录
 
-# 无需登录即可访问的接口
+# 无需登录即可访问的接口（精确匹配）与公开接口前缀
 PUBLIC_API = {"/api/health", "/api/auth/session", "/api/auth/setup", "/api/auth/login"}
+PUBLIC_PREFIXES = ("/api/public/",)
+
+# 静态资源白名单：项目根目录里还放着后端源码、adminlib/、admin.config.json
+# （含密码哈希与会话密钥）与 data/.backups/，它们绝不能被当作普通文件下载。
+# 因此只放行前端真正会用到的路径，其余一律 404。
+STATIC_ROOT_FILES = {"index.html", "favicon.svg"}
+STATIC_ROOT_DIRS = {"assets", "data"}
 
 STORE = store.Store(ROOT)
 # 查找顺序：COT_FFMPEG 环境变量 → 项目 bin/ → 系统 PATH；verify 会真跑一次 -version
@@ -93,12 +101,20 @@ def remember(action: str, detail: str, ok: bool = True) -> None:
 # ============================================================
 
 class ApiError(Exception):
-    """业务错误，会被转成 JSON 错误响应。"""
+    """业务错误，会被转成 JSON 错误响应；可携带字段级错误供表单标红。"""
 
-    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST,
+                 field_errors: list[dict[str, str]] | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.status = status
+        self.field_errors = field_errors or []
+
+
+def _first(params: dict[str, list[str]], key: str, default: str = "") -> str:
+    """取查询参数的第一个值（缺省或空串时回落到 default）。"""
+    values = params.get(key) or []
+    return (values[0] if values else "") or default
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -215,10 +231,11 @@ class Handler(SimpleHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ApiError(f"JSON 解析失败：{exc}") from exc
 
-    def read_multipart(self) -> tuple[dict[str, str], dict[str, dict]]:
+    def read_multipart(self) -> tuple[dict[str, str], dict[str, list[dict]]]:
         """解析 multipart/form-data。
 
         标准库的 cgi 模块在 Python 3.13 已被移除，这里用 email 解析器实现。
+        同名文件字段会出现多次（批量上传），因此文件一律收集成列表。
         """
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
@@ -238,7 +255,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise ApiError("无法解析 multipart 内容")
 
         fields: dict[str, str] = {}
-        files: dict[str, dict] = {}
+        files: dict[str, list[dict]] = {}
 
         for part in message.iter_parts():
             name = part.get_param("name", header="content-disposition")
@@ -249,11 +266,11 @@ class Handler(SimpleHTTPRequestHandler):
             payload = part.get_payload(decode=True) or b""
 
             if filename:
-                files[name] = {
+                files.setdefault(name, []).append({
                     "filename": filename,
                     "data": payload,
                     "content_type": part.get_content_type(),
-                }
+                })
             else:
                 fields[name] = payload.decode("utf-8", "replace")
 
@@ -311,9 +328,10 @@ class Handler(SimpleHTTPRequestHandler):
         """统一入口校验：公开接口免登录；所有写操作都要过 CSRF。"""
         mutating = method in ("POST", "PUT", "DELETE", "PATCH")
 
-        # 公开接口（健康检查 / 会话查询 / 建号 / 登录）不要求已登录，
+        # 公开接口（健康检查 / 会话查询 / 建号 / 登录 / 只读站点数据）不要求已登录，
         # 但登录与建号本身也校验 CSRF，防「登录 CSRF」把用户登进攻击者的账号
-        if path not in PUBLIC_API and self.current_session() is None:
+        public = path in PUBLIC_API or path.startswith(PUBLIC_PREFIXES)
+        if not public and self.current_session() is None:
             self.send_error_json("未登录或会话已过期", HTTPStatus.UNAUTHORIZED)
             return False
 
@@ -354,7 +372,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _route(self, method: str) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
-        query = parse_qs(parsed.query)
+        params = parse_qs(parsed.query)
 
         # 带 body 的请求一律先读完，保证 keep-alive 连接上的后续请求不会错位
         if method in ("POST", "PUT", "DELETE", "PATCH"):
@@ -368,7 +386,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/"):
                 if not self.require_auth(path, method):
                     return
-                self.handle_api(method, path, query)
+                self.handle_api(method, path, params)
                 return
 
             if method not in ("GET", "HEAD"):
@@ -388,7 +406,10 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_error_json("静态资源已关闭（--no-static）", HTTPStatus.NOT_FOUND)
         except ApiError as exc:
-            self.send_error_json(exc.message, exc.status)
+            payload: dict[str, object] = {"ok": False, "error": exc.message}
+            if exc.field_errors:
+                payload["fieldErrors"] = exc.field_errors
+            self.send_json(payload, exc.status)
         except auth.AuthError as exc:
             extra = [("Retry-After", str(exc.retry_after))] if exc.retry_after else None
             self.send_error_json(exc.message, exc.status, extra)
@@ -402,6 +423,33 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error_json(f"服务端异常：{exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     # ---------- 静态 ----------
+
+    def static_allowed(self, target: Path) -> bool:
+        """静态白名单：只有前端真正需要的路径才允许对外提供。
+
+        以解析后的真实路径判断（而非请求字符串），因此
+        `/assets/../admin.config.json` 这类穿越写法同样会被拒绝。
+        """
+        try:
+            relative = target.resolve().relative_to(ROOT.resolve())
+        except (OSError, ValueError):
+            return False
+
+        parts = relative.parts
+        if any(part.startswith(".") for part in parts):
+            return False                       # .git / .backups / .gitignore 等
+        if not parts:
+            return True                        # 站点根目录，交给 index.html 兜底
+        if len(parts) == 1:
+            # 根目录下的白名单文件，或允许目录本身（目录列表行为保持原样）
+            return parts[0] in STATIC_ROOT_FILES or parts[0] in STATIC_ROOT_DIRS
+        return parts[0] in STATIC_ROOT_DIRS
+
+    def send_head(self):                       # noqa: ANN201
+        if not self.static_allowed(Path(self.translate_path(self.path))):
+            self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+            return None
+        return super().send_head()
 
     def serve_admin_index(self) -> None:
         index = ADMIN_DIR / "index.html"
@@ -433,7 +481,7 @@ class Handler(SimpleHTTPRequestHandler):
     # API
     # ============================================================
 
-    def handle_api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
+    def handle_api(self, method: str, path: str, params: dict[str, list[str]]) -> None:
         segments = [s for s in path[len("/api/"):].split("/") if s]
 
         if not segments:
@@ -457,13 +505,37 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "tools": TOOLS.as_dict()})
             return
 
+        if head == "public":
+            self.api_public(method, segments[1:], params)
+            return
+
+        if head == "schema" and method == "GET":
+            self.api_schema()
+            return
+
+        if head == "items":
+            self.api_items(method, segments[1:], params)
+            return
+
+        if head == "videos" and method == "POST" and len(segments) >= 3 and segments[2] == "poster":
+            self.api_video_poster(segments)
+            return
+
+        if head == "item" and method == "GET":
+            self.api_item(segments[1:])
+            return
+
         if head == "data":
             self.api_data(method, segments[1:])
             return
 
-        if head == "upload" and method == "POST":
-            self.api_upload()
-            return
+        if head == "upload":
+            if method == "GET" and len(segments) > 1 and segments[1] == "options":
+                self.upload_options()
+                return
+            if method == "POST":
+                self.api_upload()
+                return
 
         if head == "backups":
             self.api_backups(method, segments[1:])
@@ -679,6 +751,12 @@ class Handler(SimpleHTTPRequestHandler):
                 # 外链视频的 src 是链接/BV 号，不是本地路径，跳过检查
                 is_embed = collection == "videos" and str(item.get("provider", "file")).lower() != "file"
 
+                if collection == "videos" and not is_embed and not str(item.get("poster") or ""):
+                    # 本地视频没有封面：前台只会显示占位块，因此在这里提示补封面
+                    missing_report.append(
+                        f"{item.get('id')}.poster → 未设置（本地视频建议生成封面：python tools/make_posters.py）"
+                    )
+
                 for key in ("src", "thumb", "poster"):
                     if key == "src" and is_embed:
                         continue
@@ -697,12 +775,220 @@ class Handler(SimpleHTTPRequestHandler):
             "orphanAlbums": orphan_report,
             "missingFiles": missing_report[:50],
             "missingFileCount": len(missing_report),
-            "backups": [b.as_dict() for b in STORE.list_backups()[:20]],
+            "backups": [
+                {**b.as_dict(), "sizeText": query.human_size(b.size)}
+                for b in STORE.list_backups()[:20]
+            ],
             "history": HISTORY[:20],
             "user": (ACCOUNTS.account().as_public_dict() if ACCOUNTS.account() else None),
             "authDisabled": bool(getattr(self.server, "auth_disabled", False)),
             "sessionHours": round(SESSIONS.ttl_seconds / 3600, 1),
         })
+
+    # ============================================================
+    # 公开只读接口（无需登录）
+    # ============================================================
+
+    def api_public(self, method: str, rest: list[str], params: dict[str, list[str]]) -> None:
+        """作品集浏览所需的搜索 / 筛选 / 排序 / 分页全部在这里完成。"""
+        if method != "GET":
+            raise ApiError("公开接口只支持 GET", HTTPStatus.METHOD_NOT_ALLOWED)
+
+        action = rest[0] if rest else "site"
+        albums = STORE.load("albums")
+        photos = STORE.load("photos")
+        videos = STORE.load("videos")
+
+        if action == "site":
+            self.send_json(query.site_payload(albums, photos, videos, ROOT))
+            return
+
+        if action == "gallery":
+            raw_tags = _first(params, "tags").replace("，", ",")
+            tags = tuple(tag.strip() for tag in raw_tags.split(",") if tag.strip())
+            page_size = query.parse_int(
+                _first(params, "pageSize", "24"), 24, low=1, high=query.MAX_PAGE_SIZE,
+            )
+            self.send_json(query.gallery_payload(
+                albums, photos, videos, ROOT,
+                q=_first(params, "q"),
+                kind=_first(params, "type", "all"),
+                album=_first(params, "album"),
+                tags=tags,
+                sort=_first(params, "sort", "date-desc"),
+                page=query.parse_int(_first(params, "page", "1"), 1, low=1),
+                page_size=page_size,
+            ))
+            return
+
+        if action == "albums":
+            self.send_json({
+                "ok": True,
+                "albums": query.album_cards(albums, photos, videos, ROOT),
+            })
+            return
+
+        if action == "exif":
+            self.api_public_exif(_first(params, "path"))
+            return
+
+        raise ApiError(f"未知的公开接口：/api/public/{action}", HTTPStatus.NOT_FOUND)
+
+    def api_public_exif(self, path_value: str) -> None:
+        """按路径解析原文件 EXIF（原先在浏览器里做的解析，移到服务端）。"""
+        relative = query.text(path_value).lstrip("/")
+        if not relative:
+            raise ApiError("缺少 path 参数")
+
+        target = (ROOT / relative).resolve()
+        try:
+            inside = target.relative_to(IMAGE_DIR.resolve())
+        except ValueError:
+            raise ApiError("只能解析照片目录下的文件", HTTPStatus.FORBIDDEN) from None
+        assert inside is not None
+        if not target.is_file():
+            raise ApiError("文件不存在", HTTPStatus.NOT_FOUND)
+
+        try:
+            entry = to_entry_exif(read_exif(target)) or {}
+        except ExifError as exc:
+            raise ApiError(f"EXIF 解析失败：{exc}") from None
+
+        rows = [
+            {"label": label, "value": query.text(entry.get(key))}
+            for key, label in query.EXIF_LABELS["photo"]
+            if query.text(entry.get(key))
+        ]
+        self.send_json({"ok": True, "path": relative, "exif": rows, "raw": entry})
+
+    # ============================================================
+    # 后台：表单 schema / 列表 / 单条
+    # ============================================================
+
+    def api_schema(self) -> None:
+        """表单字段、排序项、上传限制都由后端给出，前端不再内置这些定义。"""
+        self.send_json({
+            "ok": True,
+            "nouns": schema.nouns(),
+            "collections": {
+                name: {"fields": schema.fields_for(name)} for name in schema.collections()
+            },
+            "providers": schema.PROVIDERS,
+            "sorts": query.ADMIN_SORTS,
+            "columns": {name: query.admin_columns(name) for name in schema.collections()},
+            "upload": self.upload_options_payload(),
+        })
+
+    def upload_options_payload(self) -> dict:
+        albums = [
+            {
+                "value": query.text(album.get("id")),
+                "label": query.text(album.get("name")) or query.text(album.get("id")),
+            }
+            for album in STORE.load("albums")
+        ]
+        return {
+            "albums": albums,
+            "accept": sorted(ALLOWED_UPLOAD_SUFFIXES),
+            "maxFileBytes": MAX_UPLOAD_BYTES,
+            "maxBatchBytes": MAX_BATCH_BYTES,
+        }
+
+    def upload_options(self) -> None:
+        payload = self.upload_options_payload()
+        self.send_json({"ok": True, "upload": payload, "tools": TOOLS.as_dict()})
+
+    def api_items(self, method: str, rest: list[str], params: dict[str, list[str]]) -> None:
+        """后台表格数据：搜索 / 相册 / 标签 / 排序 / 分页都在服务端。"""
+        if not rest:
+            raise ApiError("缺少集合名（albums / photos / videos）")
+
+        collection = rest[0]
+        if collection not in store.COLLECTIONS:
+            raise ApiError(f"未知集合：{collection}", HTTPStatus.NOT_FOUND)
+
+        if method == "GET":
+            default_size = query.DEFAULT_PAGE_SIZE.get(collection, 200)
+            self.send_json(query.admin_items_payload(
+                STORE, ROOT, collection,
+                q=_first(params, "q"),
+                album=_first(params, "album"),
+                tag=_first(params, "tag"),
+                sort=_first(params, "sort"),
+                page=query.parse_int(_first(params, "page", "1"), 1, low=1),
+                page_size=query.parse_int(
+                    _first(params, "pageSize", str(default_size)), default_size,
+                    low=1, high=query.MAX_PAGE_SIZE,
+                ),
+            ))
+            return
+
+        if method == "POST":
+            payload = self.read_json()
+            if not isinstance(payload, dict):
+                raise ApiError("提交内容必须是 JSON 对象")
+            saved, warnings = self._save_item(collection, payload)
+            self.send_json({"ok": True, "item": saved, "warnings": warnings})
+            return
+
+        if method == "DELETE" and len(rest) >= 2:
+            item_id = rest[1]
+            remove_file = (rest[2] if len(rest) > 2 else "") == "file"
+            removed = self._remove_item(collection, item_id, remove_file)
+            remember("删除条目", f"{collection} / {item_id}", ok=removed is not None)
+            self.send_json({"ok": True, "deleted": item_id, "removedFiles": removed or []})
+            return
+
+        raise ApiError(f"不支持的请求：{method} {'/'.join(rest)}", HTTPStatus.METHOD_NOT_ALLOWED)
+
+    def api_item(self, rest: list[str]) -> None:
+        """单条详情：返回「已摊平」的表单值，前端直接填进控件即可。"""
+        if len(rest) < 2:
+            raise ApiError("缺少集合名与条目 id")
+
+        collection, item_id = rest[0], rest[1]
+        if collection not in store.COLLECTIONS:
+            raise ApiError(f"未知集合：{collection}", HTTPStatus.NOT_FOUND)
+
+        raw = next(
+            (item for item in STORE.load(collection) if query.text(item.get("id")) == item_id),
+            None,
+        )
+        if raw is None:
+            raise ApiError(f"条目不存在：{item_id}", HTTPStatus.NOT_FOUND)
+
+        self.send_json({
+            "ok": True,
+            "collection": collection,
+            "id": item_id,
+            "values": schema.flatten_item(collection, raw),
+            "item": raw,
+        })
+
+    def _save_item(self, collection: str, payload: dict) -> tuple[dict, list[str]]:
+        """新增与编辑共用一条路径：归一化 → 校验 → 合并已有条目 → 落盘。"""
+        item = schema.normalize_submission(collection, payload)
+        errors = schema.validate(collection, item)
+        if errors:
+            raise ApiError("提交内容有误，请检查标红的字段", HTTPStatus.BAD_REQUEST, errors)
+
+        # 编辑时保留表单没有覆盖的字段（尤其是 EXIF 的其它键）
+        existing = None
+        item_id = query.text(item.get("id"))
+        if item_id:
+            existing = next(
+                (row for row in STORE.load(collection) if query.text(row.get("id")) == item_id),
+                None,
+            )
+        item = schema.merge_with_existing(item, existing)
+
+        try:
+            saved, warnings = STORE.upsert(collection, item)
+        except store.StoreError as exc:
+            raise ApiError(str(exc)) from exc
+
+        remember("保存条目", f"{collection} / {saved.get('id')}")
+        return saved, warnings
 
     # ---------- 数据集合 ----------
 
@@ -730,8 +1016,7 @@ class Handler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             if not isinstance(payload, dict):
                 raise ApiError("新增条目必须是 JSON 对象")
-            saved, warnings = STORE.upsert(collection, payload)
-            remember("保存条目", f"{collection} / {saved.get('id')}")
+            saved, warnings = self._save_item(collection, payload)
             self.send_json({"ok": True, "item": saved, "warnings": warnings})
             return
 
@@ -778,48 +1063,86 @@ class Handler(SimpleHTTPRequestHandler):
     # ---------- 上传 ----------
 
     def api_upload(self) -> None:
+        """批量上传：一次请求可带多个文件，逐条返回结果，前端只负责展示。"""
         fields, files = self.read_multipart()
 
-        upload = files.get("file")
-        if not upload or not upload["data"]:
-            raise ApiError("没有收到文件（字段名应为 file）")
+        uploads: list[dict] = []
+        for name in ("files", "file"):
+            uploads.extend(files.get(name) or [])
 
-        original = store.safe_filename(upload["filename"], fallback="upload")
-        suffix = Path(original).suffix.lower()
-        if suffix not in ALLOWED_UPLOAD_SUFFIXES:
-            raise ApiError(
-                f"不支持的文件类型 {suffix or '(无扩展名)'}；"
-                f"允许：{', '.join(sorted(ALLOWED_UPLOAD_SUFFIXES))}"
-            )
-
-        kind = (fields.get("kind") or "auto").strip().lower()
-        is_video = suffix in media.VIDEO_SUFFIXES
-        if kind == "auto":
-            kind = "video" if is_video else "image"
-        if kind not in ("image", "video"):
-            raise ApiError(f"未知的 kind：{kind}")
+        if not uploads:
+            raise ApiError("没有收到文件（字段名应为 files）")
 
         album = (fields.get("album") or "").strip() or "uncategorized"
         tags = [t.strip() for t in (fields.get("tags") or "").replace("，", ",").split(",") if t.strip()]
-        title = (fields.get("title") or "").strip() or Path(original).stem
+
+        # 上传时可选带一张封面图片（字段名 posterFile），用于本批次的视频
+        cover = next((part for part in (files.get("posterFile") or []) if part.get("data")), None)
+
+        results = [self._handle_upload(upload, fields, album, tags, cover) for upload in uploads]
+        ok_count = sum(1 for result in results if result["ok"])
+        video_count = sum(1 for result in results if result.get("kind") == "video" and result["ok"])
+
         warnings: list[str] = []
+        if cover and not video_count:
+            warnings.append("这次上传没有视频，附带的封面图片已忽略（照片请用「缩略图」）")
 
-        if kind == "image":
-            entry, warnings = self._save_image(upload, original, album, title, tags, fields)
-            collection = "photos"
-        else:
-            entry, warnings = self._save_video(upload, original, album, title, tags, fields)
-            collection = "videos"
-
-        saved, store_warnings = STORE.upsert(collection, entry)
-
-        remember("上传", f"{saved.get('id')} ← {original}")
+        remember("上传", f"{ok_count}/{len(results)} 个文件", ok=ok_count > 0)
         self.send_json({
             "ok": True,
-            "item": saved,
-            "warnings": warnings + store_warnings,
+            "results": results,
+            "summary": {"total": len(results), "ok": ok_count, "failed": len(results) - ok_count},
+            "warnings": warnings,
             "tools": TOOLS.as_dict(),
         })
+
+    def _handle_upload(self, upload: dict, fields: dict[str, str], album: str,
+                       tags: list[str], cover: dict | None = None) -> dict:
+        """处理单个文件；失败只影响这一条，整体仍返回 200 供前端逐条显示。"""
+        name = store.safe_filename(upload.get("filename") or "", fallback="upload")
+        try:
+            if not upload.get("data"):
+                raise ApiError("文件内容为空")
+            if len(upload["data"]) > MAX_UPLOAD_BYTES:
+                raise ApiError(f"单个文件超过上限 {MAX_UPLOAD_BYTES // 1048576}MB")
+
+            suffix = Path(name).suffix.lower()
+            if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+                raise ApiError(
+                    f"不支持的文件类型 {suffix or '(无扩展名)'}；"
+                    f"允许：{', '.join(sorted(ALLOWED_UPLOAD_SUFFIXES))}"
+                )
+
+            kind = (fields.get("kind") or "auto").strip().lower()
+            if kind == "auto":
+                kind = "video" if suffix in media.VIDEO_SUFFIXES else "image"
+            if kind not in ("image", "video"):
+                raise ApiError(f"未知的 kind：{kind}")
+
+            title = (fields.get("title") or "").strip() or Path(name).stem
+            if kind == "image":
+                entry, warnings = self._save_image(upload, name, album, title, tags, fields)
+                collection = "photos"
+            else:
+                entry, warnings = self._save_video(upload, name, album, title, tags, fields, cover)
+                collection = "videos"
+
+            saved, store_warnings = STORE.upsert(collection, entry)
+        except (ApiError, store.StoreError, OSError) as exc:
+            return {"name": name, "ok": False, "error": str(exc)}
+
+        return {
+            "name": name,
+            "ok": True,
+            "id": saved.get("id"),
+            "collection": collection,
+            "kind": kind,
+            "src": saved.get("src", ""),
+            "thumb": saved.get("thumb", ""),
+            "poster": saved.get("poster", ""),
+            "exifSummary": query.exif_summary(saved, "video" if kind == "video" else "photo"),
+            "warnings": list(warnings) + list(store_warnings),
+        }
 
     def _save_image(self, upload: dict, original: str, album: str, title: str,
                     tags: list[str], fields: dict[str, str]) -> tuple[dict, list[str]]:
@@ -866,21 +1189,23 @@ class Handler(SimpleHTTPRequestHandler):
         return entry, warnings
 
     def _save_video(self, upload: dict, original: str, album: str, title: str,
-                    tags: list[str], fields: dict[str, str]) -> tuple[dict, list[str]]:
+                    tags: list[str], fields: dict[str, str],
+                    cover: dict | None = None) -> tuple[dict, list[str]]:
         target = store.unique_path(VIDEO_DIR, original)
         target.write_bytes(upload["data"])
         relative = store.ensure_relative(ROOT, target)
 
         warnings: list[str] = []
         exif: dict[str, str] = {}
+        item_id = STORE.next_id("videos")
         entry: dict[str, object] = {
-            "id": STORE.next_id("videos"),
+            "id": item_id,
             "title": title,
             "album": album,
             "provider": "file",
             "src": relative,
             "poster": "",
-            "posterTime": 2,
+            "posterTime": 0,
             "tags": tags,
         }
 
@@ -899,25 +1224,23 @@ class Handler(SimpleHTTPRequestHandler):
         else:
             warnings.append("未安装 ffprobe，无法自动读取时长与分辨率，请手动补充")
 
-        # 抓帧做封面：时间点取「2 秒」与「时长的 10%」中的较小值，避开开头黑场
-        if TOOLS.can_transcode and fields.get("makePoster", "1") not in ("0", "false"):
-            poster = store.unique_path(POSTER_DIR, f"{target.stem}.jpg")
-
-            seek = 2.0
-            duration = info.get("duration")
-            if isinstance(duration, (int, float)) and duration > 1:
-                seek = min(seek, max(0.5, float(duration) * 0.1))
-
-            ok, err = media.extract_frame(
-                TOOLS.ffmpeg, target, poster, at=seek, width=1280,   # type: ignore[arg-type]
-            )
+        # 封面：上传时带了图片就用它；否则抓帧，默认第 0 秒（第一帧）
+        if cover and cover.get("data"):
+            poster, problems = self._store_cover(item_id, cover)
+            warnings.extend(problems)
+            if poster:
+                entry["poster"] = poster
+                entry["posterTime"] = 0
+        elif TOOLS.can_transcode and fields.get("makePoster", "1") not in ("0", "false"):
+            seek = self.poster_time(fields)
+            ok, err, poster = self._capture_poster(item_id, target, seek)
             if ok:
-                entry["poster"] = store.ensure_relative(ROOT, poster)
-                entry["posterTime"] = round(seek, 1)
+                entry["poster"] = poster
+                entry["posterTime"] = round(seek, 3)
             else:
-                warnings.append(f"封面生成失败：{err}")
+                warnings.append(f"封面抓帧失败：{err}")
         elif not TOOLS.can_transcode:
-            warnings.append("未安装 ffmpeg，未生成封面；可在 videos.json 里手动指定 poster")
+            warnings.append("未安装 ffmpeg，未生成封面；可在后台为该视频上传封面图片")
 
         if exif:
             entry["exif"] = exif
@@ -926,13 +1249,124 @@ class Handler(SimpleHTTPRequestHandler):
         entry["description"] = (fields.get("description") or "").strip()
         return entry, warnings
 
+    # ---------- 视频封面 ----------
+
+    @staticmethod
+    def poster_time(fields: dict[str, str], default: float = 0.0) -> float:
+        """抓帧时间点：默认 0（第一帧）；表单里填了非负数字就用表单值。
+
+        接受两个字段名：上传表单用 `posterTime`，更换封面接口用 `time`。
+        """
+        raw = query.text(fields.get("time") or fields.get("posterTime"))
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        return value if value >= 0 else default
+
+    @staticmethod
+    def _cover_suffix(filename: str) -> str:
+        suffix = Path(store.safe_filename(filename, fallback="cover")).suffix.lower()
+        return suffix if suffix in media.IMAGE_SUFFIXES else ""
+
+    def _cover_target(self, item_id: str, suffix: str) -> Path:
+        """一个视频只保留一张封面：assets/video/posters/<id><ext>。"""
+        return POSTER_DIR / f"{store.safe_filename(item_id, fallback='video')}{suffix}"
+
+    def _drop_stale_covers(self, item_id: str, keep: Path) -> None:
+        """换封面后清掉同一视频的旧封面，避免 posters/ 越积越多。"""
+        stem = store.safe_filename(item_id, fallback="video")
+        for old in POSTER_DIR.glob(f"{stem}.*"):
+            if old.resolve() != keep.resolve():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+
+    def _store_cover(self, item_id: str, cover: dict) -> tuple[str, list[str]]:
+        """把上传的封面图片落盘，返回相对路径与提示。"""
+        suffix = self._cover_suffix(cover.get("filename") or "")
+        if not suffix:
+            return "", ["封面必须是图片（jpg / png / webp / avif / tiff）"]
+        target = self._cover_target(item_id, suffix)
+        try:
+            target.write_bytes(cover["data"])
+        except OSError as exc:
+            return "", [f"封面保存失败：{exc}"]
+        self._drop_stale_covers(item_id, target)
+        return store.ensure_relative(ROOT, target), []
+
+    def _capture_poster(self, item_id: str, video: Path, seek: float) -> tuple[bool, str, str]:
+        """从本地视频抓一帧当封面；seek=0 就是第一帧。"""
+        if not TOOLS.can_transcode:
+            return False, "未安装 ffmpeg，无法抓帧，请改为上传封面图片", ""
+        target = self._cover_target(item_id, ".jpg")
+        ok, err = media.extract_frame(TOOLS.ffmpeg, video, target, at=seek, width=1280)
+        if not ok:
+            return False, err, ""
+        self._drop_stale_covers(item_id, target)
+        return True, "", store.ensure_relative(ROOT, target)
+
+    def api_video_poster(self, rest: list[str]) -> None:
+        """为某个视频设置封面：上传一张图片，或从视频里抓一帧（默认第一帧）。"""
+        if len(rest) < 3:
+            raise ApiError("用法：POST /api/videos/{id}/poster")
+
+        item_id = rest[1]
+        item = next(
+            (row for row in STORE.load("videos") if query.text(row.get("id")) == item_id), None,
+        )
+        if item is None:
+            raise ApiError(f"视频不存在：{item_id}", HTTPStatus.NOT_FOUND)
+
+        fields, files = self.read_multipart()
+        cover = next((part for part in (files.get("file") or []) if part.get("data")), None)
+        warnings: list[str] = []
+
+        if cover:
+            poster, problems = self._store_cover(item_id, cover)
+            if not poster:
+                raise ApiError(problems[0] if problems else "封面保存失败")
+            warnings.extend(problems)
+        else:
+            provider = query.text(item.get("provider")) or "file"
+            if provider != "file":
+                raise ApiError("外链视频无法抓帧，请上传一张封面图片")
+            src = query.text(item.get("src"))
+            video = (ROOT / src).resolve() if src else None
+            if video is None or not video.is_file():
+                raise ApiError(f"视频文件不存在，无法抓帧：{src or '(未设置 src)'}")
+            seek = self.poster_time(fields, default=0.0)
+            ok, err, poster = self._capture_poster(item_id, video, seek)
+            if not ok:
+                raise ApiError(f"抓帧失败：{err}")
+            item["posterTime"] = round(seek, 3)
+
+        item["poster"] = poster
+        saved, store_warnings = STORE.upsert("videos", item)
+        warnings.extend(store_warnings)
+
+        remember("更换视频封面", f"{item_id} ← {query.text(saved.get('poster'))}")
+        self.send_json({
+            "ok": True,
+            "item": saved,
+            "posterUrl": query.text(saved.get("poster")),
+            "posterTime": saved.get("posterTime", 0),
+            "warnings": warnings,
+        })
+
     # ---------- 备份 ----------
 
     def api_backups(self, method: str, rest: list[str]) -> None:
         if method == "GET":
             self.send_json({
                 "ok": True,
-                "backups": [b.as_dict() for b in STORE.list_backups()],
+                "backups": [
+                    {**b.as_dict(), "sizeText": query.human_size(b.size)}
+                    for b in STORE.list_backups()
+                ],
                 "directory": str(STORE.backup_dir),
             })
             return
@@ -961,7 +1395,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if "multipart/form-data" in content_type:
             fields, files = self.read_multipart()
-            upload = files.get("file")
+            upload = (files.get("file") or [None])[0]
             if not upload:
                 raise ApiError("没有收到文件（字段名应为 file）")
             try:

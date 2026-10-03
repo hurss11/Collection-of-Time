@@ -189,8 +189,10 @@
    ============================================================ */
 
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-.toolbar .input { max-width: 300px; }
-.toolbar .btn { margin-left: auto; }
+.toolbar__search { flex: 1 1 220px; max-width: 320px; }
+.toolbar__sort { max-width: 200px; }
+.toolbar .btn { margin-left: auto; min-height: 36px; }
+.toolbar-note { margin: -6px 0 12px; }
 
 .table-wrap {
   border: 1px solid var(--border);
@@ -219,7 +221,7 @@
 .table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .table tr:last-child td { border-bottom: 0; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--bg-soft) 60%, transparent); }
-.table td.actions { text-align: right; white-space: nowrap; }
+.table td.cell-actions { text-align: right; white-space: nowrap; }
 .table .empty-row td { text-align: center; color: var(--text-mute); padding: 34px 12px; }
 
 .thumb {
@@ -294,10 +296,10 @@
 }
 .queue__name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue__size { color: var(--text-mute); font-variant-numeric: tabular-nums; }
-.queue__state { font-size: 11.5px; }
-.queue__state.is-ok { color: var(--ok); }
-.queue__state.is-err { color: var(--danger); }
-.queue__state.is-busy { color: var(--accent); }
+
+.upload-summary { font-size: 13px; margin-bottom: 10px; }
+.upload-summary.is-ok { color: var(--ok); }
+.upload-summary.is-warn { color: var(--warn); }
 
 .result-item {
   border: 1px solid var(--border);
@@ -323,30 +325,161 @@
 .issue code { font-size: 11.5px; }
 
 /* ============================================================
-   响应式
+   响应式：≤860px 侧边栏变吸顶栏，表格变卡片，上传单列
    ============================================================ */
 
 @media (max-width: 860px) {
   :root { --sidebar-w: 0px; }
 
+  /* ---------- 吸顶导航栏（两行：品牌 + 用户操作 / 可横向滚动的导航） ---------- */
   .sidebar {
-    position: static;
+    position: sticky;
+    inset: auto;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 30;
     width: 100%;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
-    padding: 12px;
-    overflow-x: auto;
+    gap: 8px 10px;
+    padding: 8px 10px;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
-  .sidebar__brand { padding: 0; }
+  .sidebar__brand { order: 1; padding: 0; }
   .sidebar__brand small { display: none; }
-  .nav { display: flex; gap: 6px; }
-  .nav__count { display: none; }
-  .sidebar__foot { margin: 0; display: flex; }
-  .user-chip__info { display: none; }
 
-  .main { margin-left: 0; }
-  .table-wrap { max-height: none; }
+  .sidebar__foot {
+    order: 2;
+    margin: 0 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sidebar__foot::-webkit-scrollbar { display: none; }
+  .sidebar__foot .ghost-btn { width: auto; }
+  .user-chip { padding: 4px 7px; }
+  .user-chip__info { display: none; }
+  .pill { padding: 7px 9px; white-space: nowrap; }
+  .ghost-btn { min-height: 44px; padding: 10px 12px; white-space: nowrap; }
+
+  .nav {
+    order: 3;
+    flex: 1 0 100%;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav__item {
+    width: auto;
+    flex: none;
+    min-height: 44px;
+    padding: 10px 12px;
+    white-space: nowrap;
+  }
+  .nav__count { display: inline; margin-left: 6px; }
+
+  /* ---------- 主体 ---------- */
+  .main {
+    margin-left: 0;
+    padding: 14px 12px 48px;
+    overflow-x: hidden;
+  }
+  .topbar { margin-bottom: 16px; padding-bottom: 10px; gap: 6px; }
+  .topbar h1 { font-size: 18px; }
+
+  .card { padding: 14px; border-radius: var(--radius); }
+  .grid-2, .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .stat-grid { gap: 10px; }
+
+  /* ---------- 工具栏：搜索独占一行，排序 / 新增并排，按钮 ≥44px ---------- */
+  .toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .toolbar__search { grid-column: 1 / -1; max-width: none; }
+  .toolbar__sort { max-width: none; min-height: 44px; }
+  .toolbar .btn { margin-left: 0; min-height: 44px; }
+  .toolbar-note { margin: 0 0 12px; }
+
+  /* ---------- 表格 → 卡片：同一个渲染器，只换布局 ---------- */
+  .table-wrap {
+    max-height: none;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    border-radius: 0;
+  }
+  .table { display: block; font-size: 13.5px; }
+  .table thead { display: none; }
+  .table tbody { display: grid; gap: 10px; }
+  .table tr {
+    display: block;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elev);
+  }
+  .table tbody tr:hover { background: var(--bg-elev); }
+  .table td {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 5px 0;
+    border: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .table td::before {
+    content: attr(data-label);
+    flex: 0 0 72px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+  }
+  .table td[data-label=""]::before { content: none; }
+  .table td.cell-actions {
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+  }
+  .table td.cell-actions .btn { flex: 1; min-height: 44px; font-size: 13px; }
+  .table .empty-row { padding: 0; border: 0; background: transparent; }
+  .table .empty-row td { display: block; padding: 30px 10px; text-align: center; }
+  .table .empty-row td::before { content: none; }
+
+  .thumb { width: 66px; height: 46px; }
+  .thumb--wide { width: 88px; }
+  .cell-sub, .cell-title { overflow-wrap: anywhere; }
+  .pane code, .card code { overflow-wrap: anywhere; }
+
+  /* ---------- 上传：单列 + 大触点 ---------- */
+  .upload-grid { grid-template-columns: minmax(0, 1fr); }
+  .dropzone { padding: 26px 14px; }
+  .check { min-height: 44px; }
+  #up-start { width: 100%; min-height: 48px; }
+  .queue__item { padding: 10px 12px; min-height: 48px; }
+  .queue__item .btn { min-height: 44px; }
+
+  /* ---------- 其它列表 ---------- */
+  .log { max-height: none; }
+  .log li { flex-wrap: wrap; }
+  .log__detail { white-space: normal; }
+  .kv > div { flex-direction: column; gap: 2px; }
+  .kv dt { width: auto; }
+  .row .btn, .row .ghost-btn { flex: 1 1 auto; min-height: 44px; }
 }

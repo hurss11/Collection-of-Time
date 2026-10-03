@@ -1,103 +1,44 @@
 /**
  * views.js —— 渲染层
  *
- * 输入是数据、输出是 HTML 字符串，所有函数都不带副作用（不改全局状态、不绑事件），
- * 事件统一由 app.js 用委托处理。这样视图可以独立测试与复用。
+ * 输入是服务端已经算好的数据，输出 HTML 字符串。所有函数都不带副作用
+ * （不改全局状态、不绑事件、不做业务判断），事件统一由 app.js 委托处理。
+ *
+ * 这里没有内置的字段定义、没有按集合分支的表格、没有搜索 / 排序 / 计数逻辑：
+ *   - 表格：列来自 payload.columns，行来自 items[].cells[]，只按 cell.kind 分支；
+ *   - 搜索 / 排序 / 分页 / 相册条目数：全部由 GET /api/items/{collection} 完成。
  */
 
 import { assetUrl } from './config.js';
 import { $, escapeHtml, humanSize } from './ui.js';
 
-/* ============================================================
-   表单 schema
-   ============================================================ */
-
-export const PROVIDERS = [
-  { value: 'file', label: '本地视频文件' },
-  { value: 'bilibili', label: '哔哩哔哩' },
-  { value: 'youtube', label: 'YouTube' },
-  { value: 'vimeo', label: 'Vimeo' },
-  { value: 'embed', label: '其它外链' },
-];
-
-export const SCHEMAS = {
-  albums: {
-    noun: '相册',
-    fields: [
-      { key: 'id', label: 'ID', type: 'text', required: true, mono: true,
-        hint: '唯一标识，被照片 / 视频的 album 字段引用' },
-      { key: 'name', label: '名称', type: 'text', required: true },
-      { key: 'description', label: '描述', type: 'text' },
-      { key: 'cover', label: '封面图路径', type: 'text', mono: true, placeholder: 'assets/img/ph-01.svg' },
-    ],
-  },
-  photos: {
-    noun: '照片',
-    fields: [
-      { key: 'title', label: '标题', type: 'text', required: true },
-      { key: 'album', label: '相册', type: 'album' },
-      { key: 'date', label: '拍摄时间', type: 'text', placeholder: '2026-01-18 06:42:00' },
-      { key: 'location', label: '地点', type: 'text' },
-      { key: 'tags', label: '标签（逗号分隔）', type: 'tags' },
-      { key: 'src', label: '大图路径', type: 'text', mono: true, placeholder: 'assets/img/photos/xxx.jpg' },
-      { key: 'thumb', label: '缩略图路径', type: 'text', mono: true, hint: '留空则使用大图' },
-      { key: 'description', label: '描述', type: 'textarea' },
-      { key: 'exif.camera', label: '相机', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.lens', label: '镜头', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.focalLength', label: '焦距', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.aperture', label: '光圈', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.shutter', label: '快门', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.iso', label: 'ISO', type: 'text', group: 'EXIF 拍摄参数' },
-      { key: 'exif.dimensions', label: '尺寸', type: 'text', group: 'EXIF 拍摄参数' },
-    ],
-  },
-  videos: {
-    noun: '视频',
-    fields: [
-      { key: 'title', label: '标题', type: 'text', required: true },
-      { key: 'album', label: '相册', type: 'album' },
-      { key: 'provider', label: '来源', type: 'select', options: PROVIDERS },
-      { key: 'src', label: '文件路径 / 视频链接 / BV 号', type: 'text', mono: true,
-        placeholder: 'assets/video/xxx.mp4 或 BV1xxxxxxxxx' },
-      { key: 'poster', label: '封面图', type: 'text', mono: true, hint: '外链视频必填：跨域 iframe 无法自动抓帧' },
-      { key: 'posterTime', label: '抓帧时间（秒）', type: 'number' },
-      { key: 'duration', label: '时长（秒）', type: 'number' },
-      { key: 'resolution', label: '分辨率', type: 'text', placeholder: '3840 × 2160' },
-      { key: 'date', label: '拍摄时间', type: 'text', placeholder: '2026-01-18 06:20:00' },
-      { key: 'location', label: '地点', type: 'text' },
-      { key: 'tags', label: '标签（逗号分隔）', type: 'tags' },
-      { key: 'description', label: '描述', type: 'textarea' },
-      { key: 'exif.camera', label: '设备', type: 'text', group: '视频参数' },
-      { key: 'exif.fps', label: '帧率', type: 'text', group: '视频参数' },
-      { key: 'exif.codec', label: '编码', type: 'text', group: '视频参数' },
-    ],
-  },
-};
-
 export const PANE_META = {
   overview: ['概览', '数据来源：<code>data/*.json</code>'],
-  photos: ['照片', '编辑后逐条写回 <code>data/photos.json</code>，服务端会自动备份'],
+  photos: ['照片', '搜索 / 排序由服务端完成，编辑后逐条写回 <code>data/photos.json</code>'],
   videos: ['视频', '本地文件与外链嵌入共用一份 <code>data/videos.json</code>'],
   albums: ['相册', '相册 id 被照片与视频引用'],
-  upload: ['上传', '文件落位到 <code>assets/</code>，条目自动写入对应 JSON'],
+  upload: ['上传', '一次批量提交，服务端逐条返回结果'],
   backups: ['备份', '导出 / 导入 / 回滚历史版本'],
   account: ['账号', '修改密码与查看登录状态'],
 };
 
+export const EMPTY_TEXT = {
+  photos: '没有匹配的照片',
+  videos: '没有匹配的视频',
+  albums: '还没有相册',
+};
+
 /* ============================================================
-   小组件
+   单元格渲染：只按 cell.kind 分支，不按集合分支
    ============================================================ */
 
-export function albumName(albums, id) {
-  const found = albums.find((a) => a.id === id);
-  return found ? found.name : id || '未分类';
-}
+function thumbCell(cell) {
+  const url = cell.remoteUrl || cell.url || '';
+  const className = cell.wide ? 'thumb thumb--wide' : 'thumb';
 
-/** 缩略图；文件缺失时降级成一个角标而不是碎图 */
-function thumbCell(url, className, missingText) {
-  if (!url) return `<span class="badge badge--missing">${escapeHtml(missingText)}</span>`;
-  if (/^https?:\/\//i.test(url)) return '<span class="badge badge--embed">外链</span>';
-
+  if (!url || cell.missing) {
+    return `<span class="badge badge--missing">${escapeHtml(cell.fallback || '缺失')}</span>`;
+  }
   return `<img class="${className}" src="${escapeHtml(assetUrl(url))}" alt="" loading="lazy"
       onerror="this.replaceWith(Object.assign(document.createElement('span'),
         {className:'badge badge--missing',textContent:'缺失'}))" />`;
@@ -105,31 +46,104 @@ function thumbCell(url, className, missingText) {
 
 function taglist(tags) {
   if (!Array.isArray(tags) || !tags.length) return '<span class="muted">–</span>';
-  return `<span class="taglist">${tags.slice(0, 4).map((t) => `<span>${escapeHtml(t)}</span>`).join('')}</span>`;
+  return `<span class="taglist">${tags
+    .slice(0, 4)
+    .map((tag) => `<span>${escapeHtml(tag)}</span>`)
+    .join('')}</span>`;
 }
 
-function actions(collection, id) {
+function actionsCell(cell) {
+  // poster 动作只有视频行才有（由后端在 actions 单元格里给出）
+  const poster = cell.poster
+    ? `<button class="btn btn--sm" data-poster="${escapeHtml(cell.poster)}" type="button">封面</button>`
+    : '';
   return `
-    <button class="btn btn--sm" data-edit="${collection}:${escapeHtml(id)}" type="button">编辑</button>
-    <button class="btn btn--sm btn--danger" data-del="${collection}:${escapeHtml(id)}" type="button">删除</button>`;
+    ${poster}
+    <button class="btn btn--sm" data-edit="${escapeHtml(cell.edit || '')}" type="button">编辑</button>
+    <button class="btn btn--sm btn--danger" data-del="${escapeHtml(cell.del || '')}" type="button">删除</button>`;
 }
 
-function emptyRow(colspan, text) {
-  return `<tr class="empty-row"><td colspan="${colspan}">${escapeHtml(text)}</td></tr>`;
+function renderCell(cell) {
+  switch (cell.kind) {
+    case 'thumb':
+      return thumbCell(cell);
+    case 'title':
+      return `<div class="cell-title">${escapeHtml(cell.text || '未命名')}</div>`
+        + (cell.sub ? `<div class="cell-sub">${escapeHtml(cell.sub)}</div>` : '');
+    case 'tags':
+      return taglist(cell.tags);
+    case 'badge':
+      return `<span class="badge badge--${escapeHtml(cell.tone || 'file')}" title="${escapeHtml(cell.title || '')}">${escapeHtml(cell.text || '')}</span>`;
+    case 'sub':
+      return `<span class="cell-sub">${escapeHtml(cell.text || '')}</span>`;
+    case 'muted':
+      return `<span class="muted">${escapeHtml(cell.text || '')}</span>`;
+    case 'actions':
+      return actionsCell(cell);
+    case 'text':
+    default:
+      return escapeHtml(cell.text || '');
+  }
+}
+
+/* ============================================================
+   表格：一个渲染器覆盖所有集合
+   ============================================================ */
+
+/**
+ * 渲染一张表格。
+ * 表头取 payload.columns；每行取 items[].cells，按下标与列一一对应。
+ * 每个 td 都带上 data-label（= 列名），窄屏下 CSS 用它把行变成卡片。
+ * @param {HTMLTableElement} table
+ * @param {{columns?: object[], items?: object[]}} payload GET /api/items/{collection} 的响应
+ * @param {string} emptyText 无数据时的提示
+ */
+export function renderTable(table, payload, emptyText = '没有数据') {
+  if (!table) return;
+
+  const columns = payload?.columns || [];
+  const items = payload?.items || [];
+
+  const head = `<thead><tr>${columns
+    .map((column) => `<th>${escapeHtml(column.label || '')}</th>`)
+    .join('')}</tr></thead>`;
+
+  const rows = items.length
+    ? items.map((row) => {
+      const cells = row.cells || [];
+      const tds = columns.map((column, index) => {
+        const cell = cells[index] || { kind: 'text', text: '' };
+        const label = column.label || '';
+        const cls = cell.kind === 'actions' ? ' class="cell-actions"' : '';
+        return `<td${cls} data-label="${escapeHtml(label)}">${renderCell(cell)}</td>`;
+      }).join('');
+      return `<tr>${tds}</tr>`;
+    }).join('')
+    : `<tr class="empty-row"><td colspan="${columns.length || 1}">${escapeHtml(emptyText)}</td></tr>`;
+
+  table.innerHTML = `${head}<tbody>${rows}</tbody>`;
+}
+
+/** 填充排序下拉：选项来自 schema.sorts[collection] */
+export function renderSortOptions(select, sorts, selected) {
+  if (!select) return '';
+  const options = sorts || [];
+  select.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join('');
+  const values = options.map((option) => option.value);
+  const value = values.includes(selected) ? selected : values[0] || '';
+  select.value = value;
+  return value;
 }
 
 /* ============================================================
    概览
    ============================================================ */
 
-export function renderCounts(state) {
-  const counts = {
-    photos: state.photos.length,
-    videos: state.videos.length,
-    albums: state.albums.length,
-  };
+export function renderCounts(counts) {
   document.querySelectorAll('.nav__count').forEach((node) => {
-    node.textContent = counts[node.dataset.count] ?? 0;
+    node.textContent = counts?.[node.dataset.count] ?? 0;
   });
 }
 
@@ -156,23 +170,23 @@ export function renderTools(tools) {
   }
 }
 
-export function renderStats(state, info) {
+export function renderStats(counts, info) {
   const missing = info.missingFileCount ?? 0;
   const orphans = (info.orphanAlbums || []).length;
 
   const cards = [
-    { label: '照片', value: state.photos.length, note: 'data/photos.json' },
-    { label: '视频', value: state.videos.length, note: 'data/videos.json' },
-    { label: '相册', value: state.albums.length, note: 'data/albums.json' },
+    { label: '照片', value: counts.photos ?? 0, note: 'data/photos.json' },
+    { label: '视频', value: counts.videos ?? 0, note: 'data/videos.json' },
+    { label: '相册', value: counts.albums ?? 0, note: 'data/albums.json' },
     { label: '缺失文件', value: missing, note: missing ? '条目引用的文件不存在' : '全部文件就位', tone: missing ? 'warn' : 'ok' },
-    { label: '失效相册引用', value: orphans, note: orphans ? '条目指向了不存在的相册' : '相册引用正常', tone: orphans ? 'warn' : 'ok' },
+    { label: '失效相册引用', value: orphans, note: orphans ? '照片 / 视频引用了不存在的相册' : '引用全部有效', tone: orphans ? 'warn' : 'ok' },
   ];
 
-  $('#stat-grid').innerHTML = cards.map((c) => `
-    <div class="stat${c.tone ? ` stat--${c.tone}` : ''}">
-      <div class="stat__label">${escapeHtml(c.label)}</div>
-      <div class="stat__value">${c.value}</div>
-      <div class="stat__note">${escapeHtml(c.note)}</div>
+  $('#stat-grid').innerHTML = cards.map((card) => `
+    <div class="stat${card.tone ? ` stat--${card.tone}` : ''}">
+      <div class="stat__label">${escapeHtml(card.label)}</div>
+      <div class="stat__value">${card.value}</div>
+      <div class="stat__note">${escapeHtml(card.note)}</div>
     </div>`).join('');
 }
 
@@ -202,169 +216,106 @@ export function renderIntegrity(info) {
 
 export function renderHistory(history) {
   $('#history').innerHTML = (history || []).length
-    ? history.map((h) => `
+    ? history.map((entry) => `
       <li>
-        <span class="log__time">${escapeHtml(h.at)}</span>
-        <span class="log__action">${escapeHtml(h.action)}</span>
-        <span class="log__detail" style="${h.ok ? '' : 'color:var(--danger)'}">${escapeHtml(h.detail)}</span>
+        <span class="log__time">${escapeHtml(entry.at)}</span>
+        <span class="log__action">${escapeHtml(entry.action)}</span>
+        <span class="log__detail" style="${entry.ok ? '' : 'color:var(--danger)'}">${escapeHtml(entry.detail)}</span>
       </li>`).join('')
     : '<li class="muted">本次启动后还没有操作记录。</li>';
 }
 
-/* ============================================================
-   表格
-   ============================================================ */
-
-export function matchQuery(item, collection, query) {
-  const keyword = (query || '').trim().toLowerCase();
-  if (!keyword) return true;
-
-  const haystack = [
-    item.id, item.title, item.album, item.location, item.description,
-    item.exif?.camera, item.exif?.lens, item.resolution,
-    ...(item.tags || []),
-  ].filter(Boolean).join(' ').toLowerCase();
-
-  return keyword.split(/\s+/).every((term) => haystack.includes(term));
-}
-
-export function renderTable(state, collection) {
-  const table = $(`#table-${collection}`);
-  if (!table) return;
-
-  if (collection === 'photos') {
-    const rows = state.photos.filter((item) => matchQuery(item, 'photos', state.query.photos));
-    table.innerHTML = `
-      <thead><tr><th>预览</th><th>标题</th><th>相册</th><th>时间</th><th>标签</th><th>EXIF</th><th></th></tr></thead>
-      <tbody>${rows.length ? rows.map((item) => `
-        <tr>
-          <td>${thumbCell(item.thumb || item.src, 'thumb', '无图')}</td>
-          <td>
-            <div class="cell-title">${escapeHtml(item.title || '未命名')}</div>
-            <div class="cell-sub">${escapeHtml(item.id)}</div>
-          </td>
-          <td>${escapeHtml(albumName(state.albums, item.album))}</td>
-          <td class="cell-sub">${escapeHtml(item.date || '–')}</td>
-          <td>${taglist(item.tags)}</td>
-          <td class="cell-sub">${escapeHtml(
-            [item.exif?.camera, item.exif?.shutter, item.exif?.aperture, item.exif?.iso].filter(Boolean).join(' · ') || '–',
-          )}</td>
-          <td class="actions">${actions('photos', item.id)}</td>
-        </tr>`).join('') : emptyRow(7, '没有匹配的照片')}</tbody>`;
-    return;
-  }
-
-  if (collection === 'videos') {
-    const rows = state.videos.filter((item) => matchQuery(item, 'videos', state.query.videos));
-    table.innerHTML = `
-      <thead><tr><th>封面</th><th>标题</th><th>来源</th><th>时长</th><th>分辨率</th><th>相册</th><th></th></tr></thead>
-      <tbody>${rows.length ? rows.map((item) => `
-        <tr>
-          <td>${thumbCell(item.poster, 'thumb thumb--wide', '无封面')}</td>
-          <td>
-            <div class="cell-title">${escapeHtml(item.title || '未命名')}</div>
-            <div class="cell-sub">${escapeHtml(item.id)}</div>
-          </td>
-          <td><span class="badge ${item.provider === 'file' || !item.provider ? 'badge--file' : 'badge--embed'}">${escapeHtml(item.provider || 'file')}</span></td>
-          <td class="cell-sub">${escapeHtml(item.duration ?? '–')}</td>
-          <td class="cell-sub">${escapeHtml(item.resolution || '–')}</td>
-          <td>${escapeHtml(albumName(state.albums, item.album))}</td>
-          <td class="actions">${actions('videos', item.id)}</td>
-        </tr>`).join('') : emptyRow(7, '没有匹配的视频')}</tbody>`;
-    return;
-  }
-
-  if (collection === 'albums') {
-    const counts = new Map();
-    [...state.photos, ...state.videos].forEach((item) => {
-      counts.set(item.album, (counts.get(item.album) || 0) + 1);
-    });
-
-    table.innerHTML = `
-      <thead><tr><th>封面</th><th>ID</th><th>名称</th><th>描述</th><th>条目</th><th></th></tr></thead>
-      <tbody>${state.albums.length ? state.albums.map((item) => `
-        <tr>
-          <td>${thumbCell(item.cover, 'thumb', '无封面')}</td>
-          <td class="cell-sub">${escapeHtml(item.id)}</td>
-          <td class="cell-title">${escapeHtml(item.name || '')}</td>
-          <td class="muted">${escapeHtml(item.description || '–')}</td>
-          <td>${counts.get(item.id) || 0}</td>
-          <td class="actions">${actions('albums', item.id)}</td>
-        </tr>`).join('') : emptyRow(6, '还没有相册')}</tbody>`;
-  }
-}
-
+/** 备份列表：体积用服务端给的 sizeText，前端不再换算 */
 export function renderBackups(backups) {
   const table = $('#table-backups');
   if (!table) return;
 
   table.innerHTML = `
     <thead><tr><th>文件</th><th>集合</th><th>大小</th><th>时间</th><th></th></tr></thead>
-    <tbody>${(backups || []).length ? backups.map((b) => `
+    <tbody>${(backups || []).length ? backups.map((backup) => `
       <tr>
-        <td class="cell-sub">${escapeHtml(b.name)}</td>
-        <td>${escapeHtml(b.collection)}</td>
-        <td class="cell-sub">${humanSize(b.size)}</td>
-        <td class="cell-sub">${escapeHtml(b.modified)}</td>
-        <td class="actions"><button class="btn btn--sm" data-restore="${escapeHtml(b.name)}" type="button">恢复</button></td>
-      </tr>`).join('') : emptyRow(5, '还没有备份（首次保存后自动生成）')}</tbody>`;
+        <td class="cell-sub" data-label="文件">${escapeHtml(backup.name)}</td>
+        <td data-label="集合">${escapeHtml(backup.collection)}</td>
+        <td class="cell-sub" data-label="大小">${escapeHtml(backup.sizeText || humanSize(backup.size))}</td>
+        <td class="cell-sub" data-label="时间">${escapeHtml(backup.modified)}</td>
+        <td class="cell-actions" data-label=""><button class="btn btn--sm" data-restore="${escapeHtml(backup.name)}" type="button">恢复</button></td>
+      </tr>`).join('') : '<tr class="empty-row"><td colspan="5">还没有备份（首次保存后自动生成）</td></tr>'}</tbody>`;
 }
 
-export function renderAlbumOptions(albums, selected = '') {
+/* ============================================================
+   上传
+   ============================================================ */
+
+/** 上传选项：相册下拉与 accept 都来自服务端 schema.upload */
+export function renderUploadOptions(upload) {
   const select = $('#up-album');
-  if (!select) return;
+  if (select) {
+    const previous = select.value;
+    const albums = upload?.albums || [];
+    select.innerHTML = [
+      '<option value="uncategorized">未分类</option>',
+      ...albums.map((album) => `<option value="${escapeHtml(album.value)}">${escapeHtml(album.label)}</option>`),
+    ].join('');
+    if (previous) select.value = previous;
+    if (!select.value) select.value = 'uncategorized';
+  }
 
-  select.innerHTML = [
-    '<option value="uncategorized">未分类</option>',
-    ...albums.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}（${escapeHtml(a.id)}）</option>`),
-  ].join('');
-  if (selected) select.value = selected;
+  const input = $('#file-input');
+  if (input && Array.isArray(upload?.accept) && upload.accept.length) {
+    input.accept = upload.accept.join(',');
+  }
 }
 
-/** 上传结果面板 */
-export function renderUploadResult(results) {
+/** 待上传文件列表（只是本地选择，不代表服务端结果） */
+export function renderQueue(files) {
+  const host = $('#queue');
+  if (!host) return;
+
+  host.innerHTML = (files || []).map((file, index) => `
+      <div class="queue__item">
+        <span class="queue__name">${escapeHtml(file.name)}</span>
+        <span class="queue__size">${humanSize(file.size)}</span>
+        <button class="btn btn--sm" data-drop="${index}" type="button">移除</button>
+      </div>`).join('');
+}
+
+/** 上传结果：results / summary 由服务端给出，原样展示 */
+export function renderUploadResult(payload) {
   const box = $('#upload-result');
+  if (!box) return;
   box.hidden = false;
 
-  $('#upload-result-body').innerHTML = results.map((r) => {
-    if (!r.ok) {
+  const results = payload?.results || [];
+  const summary = payload?.summary || { total: results.length, ok: 0, failed: 0 };
+
+  const summaryNode = $('#upload-result-summary');
+  if (summaryNode) {
+    summaryNode.className = `upload-summary${summary.failed ? ' is-warn' : ' is-ok'}`;
+    summaryNode.textContent = `共 ${summary.total} 个文件：成功 ${summary.ok}，失败 ${summary.failed}`;
+  }
+
+  $('#upload-result-body').innerHTML = results.map((result) => {
+    if (!result.ok) {
       return `<div class="result-item">
-        <div class="result-item__head"><strong>${escapeHtml(r.file)}</strong>
+        <div class="result-item__head"><strong>${escapeHtml(result.name)}</strong>
           <span class="badge badge--missing">失败</span></div>
-        <p class="muted">${escapeHtml(r.error)}</p>
+        <p class="muted">${escapeHtml(result.error || '上传失败')}</p>
       </div>`;
     }
 
-    const item = r.item;
-    const exif = item.exif || {};
-    const summary = [exif.camera, exif.lens, exif.focalLength, exif.aperture, exif.shutter, exif.iso, exif.fps, exif.codec]
+    const meta = [result.kind === 'video' ? '视频' : '图片', result.collection, result.exifSummary]
       .filter(Boolean).join(' · ');
 
     return `<div class="result-item">
       <div class="result-item__head">
-        <strong>${escapeHtml(item.title)}</strong>
-        <span class="badge badge--file">${escapeHtml(item.id)}</span>
-        <span class="muted">${escapeHtml(item.album)}</span>
+        <strong>${escapeHtml(result.name)}</strong>
+        <span class="badge badge--file">${escapeHtml(result.id || '')}</span>
       </div>
-      <div class="cell-sub">${escapeHtml(item.src || '')}</div>
-      ${item.poster ? `<div class="cell-sub">封面：${escapeHtml(item.poster)}</div>` : ''}
-      ${item.thumb && item.thumb !== item.src ? `<div class="cell-sub">缩略图：${escapeHtml(item.thumb)}</div>` : ''}
-      ${summary ? `<div class="cell-sub">${escapeHtml(summary)}</div>` : ''}
-      ${r.warnings.length ? `<ul class="warnings">${r.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : ''}
+      ${result.src ? `<div class="cell-sub">${escapeHtml(result.src)}</div>` : ''}
+      ${result.poster ? `<div class="cell-sub">封面：${escapeHtml(result.poster)}</div>` : ''}
+      ${result.thumb && result.thumb !== result.src ? `<div class="cell-sub">缩略图：${escapeHtml(result.thumb)}</div>` : ''}
+      ${meta ? `<div class="cell-sub">${escapeHtml(meta)}</div>` : ''}
+      ${(result.warnings || []).length ? `<ul class="warnings">${result.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : ''}
     </div>`;
-  }).join('');
-}
-
-/** 上传队列 */
-export function renderQueue(queue, meta) {
-  $('#queue').innerHTML = queue.map((file, index) => {
-    const item = meta?.[index];
-    return `
-      <div class="queue__item">
-        <span class="queue__name">${escapeHtml(file.name)}</span>
-        <span class="queue__size">${humanSize(file.size)}</span>
-        <span class="queue__state ${item?.className || ''}">${escapeHtml(item?.state || '待上传')}</span>
-        <button class="btn btn--sm" data-drop="${index}" type="button">移除</button>
-      </div>`;
   }).join('');
 }

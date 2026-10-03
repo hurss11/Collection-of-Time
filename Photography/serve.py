@@ -2,7 +2,11 @@
 """Photography 项目的本地静态服务器。
 
 用途：浏览器的 fetch / ES Module 在 file:// 协议下会被拦截，
-      通过本脚本以 HTTP 方式访问即可正常加载 JSON 数据与解析 EXIF。
+      通过本脚本以 HTTP 方式访问即可正常加载站点。
+
+除静态文件外，本脚本还提供与正式后台**完全相同**的公开只读接口
+（/api/public/*），因此 `python serve.py` 即可单独预览整个作品集，
+不必启动 admin.py。查询逻辑复用 adminlib.query，两端不会跑偏。
 
 用法：
     python serve.py            # 默认 http://127.0.0.1:8000
@@ -12,17 +16,34 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import os
 import socketserver
 import sys
 import webbrowser
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from adminlib import query, store                                  # noqa: E402
+from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT_PATH = Path(ROOT)
 DEFAULT_PORT = 8000
+IMAGE_DIR = ROOT_PATH / "assets" / "img" / "photos"
+
+STORE = store.Store(ROOT_PATH)
+
+
+def first(params: dict[str, list[str]], key: str, default: str = "") -> str:
+    values = params.get(key) or []
+    return (values[0] if values else "") or default
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    """开发用静态处理器：禁用缓存，便于修改后刷新即生效。"""
+    """开发用静态处理器：禁用缓存，便于修改后刷新即生效；另带公开只读接口。"""
 
     def end_headers(self) -> None:  # noqa: D102
         self.send_header("Cache-Control", "no-store, must-revalidate")
@@ -30,6 +51,96 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: D102
         sys.stderr.write("  %s\n" % (fmt % args))
+
+    def do_GET(self) -> None:                                   # noqa: N802
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path.startswith("/api/public/"):
+            self.handle_public(path[len("/api/public/"):], parse_qs(parsed.query))
+            return
+        super().do_GET()
+
+    def do_HEAD(self) -> None:                                  # noqa: N802
+        self.do_GET()
+
+    # ---------- 公开只读接口 ----------
+
+    def send_json(self, payload: object, status: int = http.HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def handle_public(self, action: str, params: dict[str, list[str]]) -> None:
+        action = action.strip("/") or "site"
+        albums = STORE.load("albums")
+        photos = STORE.load("photos")
+        videos = STORE.load("videos")
+
+        if action == "site":
+            self.send_json(query.site_payload(albums, photos, videos, ROOT_PATH))
+            return
+
+        if action == "albums":
+            self.send_json({
+                "ok": True,
+                "albums": query.album_cards(albums, photos, videos, ROOT_PATH),
+            })
+            return
+
+        if action == "gallery":
+            raw_tags = first(params, "tags").replace("，", ",")
+            tags = tuple(tag.strip() for tag in raw_tags.split(",") if tag.strip())
+            self.send_json(query.gallery_payload(
+                albums, photos, videos, ROOT_PATH,
+                q=first(params, "q"),
+                kind=first(params, "type", "all"),
+                album=first(params, "album"),
+                tags=tags,
+                sort=first(params, "sort", "date-desc"),
+                page=query.parse_int(first(params, "page", "1"), 1, low=1),
+                page_size=query.parse_int(
+                    first(params, "pageSize", "24"), 24, low=1, high=query.MAX_PAGE_SIZE,
+                ),
+            ))
+            return
+
+        if action == "exif":
+            self.handle_public_exif(first(params, "path"))
+            return
+
+        self.send_json({"ok": False, "error": f"未知的公开接口：{action}"},
+                       http.HTTPStatus.NOT_FOUND)
+
+    def handle_public_exif(self, path_value: str) -> None:
+        relative = query.text(path_value).lstrip("/")
+        target = (ROOT_PATH / relative).resolve() if relative else ROOT_PATH
+        try:
+            target.relative_to(IMAGE_DIR.resolve())
+        except ValueError:
+            self.send_json({"ok": False, "error": "只能解析照片目录下的文件"},
+                           http.HTTPStatus.FORBIDDEN)
+            return
+        if not relative or not target.is_file():
+            self.send_json({"ok": False, "error": "文件不存在"}, http.HTTPStatus.NOT_FOUND)
+            return
+
+        try:
+            entry = to_entry_exif(read_exif(target)) or {}
+        except ExifError as exc:
+            self.send_json({"ok": False, "error": f"EXIF 解析失败：{exc}"},
+                           http.HTTPStatus.BAD_REQUEST)
+            return
+
+        rows = [
+            {"label": label, "value": query.text(entry.get(key))}
+            for key, label in query.EXIF_LABELS["photo"]
+            if query.text(entry.get(key))
+        ]
+        self.send_json({"ok": True, "path": relative, "exif": rows, "raw": entry})
 
 
 def main() -> int:
@@ -40,6 +151,7 @@ def main() -> int:
     with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
         url = f"http://127.0.0.1:{port}/"
         print(f"Photography 已启动：{url}")
+        print(f"  公开接口：{url}api/public/site")
         print("按 Ctrl+C 停止服务。")
         try:
             webbrowser.open(url)

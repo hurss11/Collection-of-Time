@@ -134,3 +134,11 @@
 @media (max-width: 420px) {
   .login__card { padding: 24px 20px 18px; }
 }
+
+@media (max-width: 860px) {
+  .login { padding: 18px 14px; }
+  .login__card { width: 100%; padding: 24px 20px 18px; }
+  .login .input { font-size: 16px; }        /* iOS：避免聚焦时页面放大 */
+  .login .btn { min-height: 48px; }
+  .pwd__toggle { min-height: 40px; padding: 8px 10px; }
+}

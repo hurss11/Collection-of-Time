@@ -1,51 +1,53 @@
 /**
- * gallery.js —— 作品网格与相册卡片的渲染
+ * gallery.js —— 作品网格 / 相册总览 / 筛选 chips 的渲染
  *
- * 只负责「渲染 DOM + 绑定回调」，不持有状态（状态由 app.js 管理）。
+ * 只把 API 已经算好的字段拼成 HTML，并同步选中态；
+ * 不含筛选、排序、计数、格式化等任何业务逻辑。
  */
 
-import { escapeHtml, MEDIA_TYPE } from './data.js';
+import { escapeHtml } from './data.js';
 
-/** 照片：相机 + 曝光参数摘要 */
-function photoSummary(item) {
-  const e = item.exif || {};
-  return [e.camera, e.focalLength, e.aperture, e.shutter, e.iso].filter(Boolean).join(' · ');
-}
+const VIDEO = 'video';
 
-/** 视频：来源 + 分辨率 + 帧率摘要 */
-function videoSummary(item) {
-  const e = item.exif || {};
-  return [item.providerLabel, item.resolution, e.fps].filter(Boolean).join(' · ');
-}
+/* ---------- 作品网格 ---------- */
 
-function summaryOf(item) {
-  return item.type === MEDIA_TYPE.VIDEO ? videoSummary(item) : photoSummary(item);
-}
-
-/**
- * 媒体区域：照片用 <img>，视频优先用封面图；
- * 没有封面图的本地视频交给 poster.js 抓帧（先渲染 <video> 占位）。
- */
+/** 媒体区：服务端给的封面 / 缩略图地址；为空时用占位块。 */
 function mediaMarkup(item) {
-  const isVideo = item.type === MEDIA_TYPE.VIDEO;
-
-  if (isVideo && !item.poster && item.src) {
-    return `<video class="card__video" data-poster-src="${escapeHtml(item.src)}"
-                   data-poster-time="${item.posterTime}" muted playsinline preload="none"
-                   aria-hidden="true"></video>`;
-  }
-
-  const source = isVideo ? item.poster || item.src : item.thumb;
-  if (!source) return '<span class="card__placeholder" aria-hidden="true"></span>';
-
-  return `<img src="${escapeHtml(source)}" alt="${escapeHtml(item.title)}"
+  if (!item.imageUrl) return '<span class="card__placeholder" aria-hidden="true"></span>';
+  return `<img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.title)}"
                loading="lazy" decoding="async" data-lazy />`;
 }
 
+/** 服务端标记的缺失角标（封面缺失 / 视频文件缺失） */
+function flagsMarkup(item) {
+  const flags = [];
+  if (item.imageMissing) flags.push('图缺失');
+  if (item.kind === VIDEO && item.srcMissing) flags.push('文件缺失');
+  if (!flags.length) return '';
+  return `<span class="card__flags">${flags
+    .map((text) => `<span class="card__flag">${escapeHtml(text)}</span>`)
+    .join('')}</span>`;
+}
+
+function tagsMarkup(tags) {
+  if (!tags || !tags.length) return '';
+  return `<span class="card__tags">${tags
+    .slice(0, 4)
+    .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
+    .join('')}</span>`;
+}
+
 function cardMarkup(item) {
-  const isVideo = item.type === MEDIA_TYPE.VIDEO;
-  const summary = summaryOf(item);
-  const meta = [item.location, item.date].filter(Boolean).join(' · ');
+  const isVideo = item.kind === VIDEO;
+  const subtitle = item.subtitle
+    ? `<span class="card__meta">${escapeHtml(item.subtitle)}</span>`
+    : '';
+  const summary = item.exifSummary
+    ? `<span class="card__meta">${escapeHtml(item.exifSummary)}</span>`
+    : '';
+  const date = item.dateText
+    ? `<span class="card__meta card__meta--date">${escapeHtml(item.dateText)}</span>`
+    : '';
 
   return `
     <article class="card${isVideo ? ' card--video' : ''}" role="listitem" data-id="${escapeHtml(item.id)}">
@@ -53,22 +55,17 @@ function cardMarkup(item) {
               aria-label="${isVideo ? '播放' : '查看'}《${escapeHtml(item.title)}》">
         <div class="card__media">
           ${mediaMarkup(item)}
-          <span class="card__badge">${escapeHtml(item.albumName || item.albumId)}</span>
+          ${item.albumName ? `<span class="card__badge">${escapeHtml(item.albumName)}</span>` : ''}
           ${isVideo ? '<span class="play-badge" aria-hidden="true"></span>' : ''}
           ${isVideo && item.durationText ? `<span class="card__duration">${escapeHtml(item.durationText)}</span>` : ''}
+          ${flagsMarkup(item)}
         </div>
         <div class="card__body">
           <span class="card__title">${escapeHtml(item.title)}</span>
-          ${meta ? `<span class="card__meta">${escapeHtml(meta)}</span>` : ''}
-          ${summary ? `<span class="card__meta">${escapeHtml(summary)}</span>` : ''}
-          ${
-            item.tags.length
-              ? `<span class="card__tags">${item.tags
-                  .slice(0, 4)
-                  .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
-                  .join('')}</span>`
-              : ''
-          }
+          ${subtitle}
+          ${summary}
+          ${date}
+          ${tagsMarkup(item.tags)}
         </div>
       </button>
     </article>`;
@@ -87,15 +84,16 @@ function attachLazyFade(root) {
 }
 
 /**
- * 渲染媒体网格（事件委托由 app.js 统一绑定，避免重复注册）。
+ * 渲染作品网格（事件委托由 app.js 统一绑定）。
  * @param {HTMLElement} container
- * @param {object[]} items 照片与视频的混合数组
- * @returns {HTMLVideoElement[]} 需要抓取封面的视频元素，交给 poster.js 处理
+ * @param {object[]} items 服务端返回的作品条目
+ * @param {{append?: boolean}} [options] append=true 时追加（分页「加载更多」）
  */
-export function renderGallery(container, items) {
-  container.innerHTML = items.map(cardMarkup).join('');
+export function renderCards(container, items, options) {
+  const html = items.map(cardMarkup).join('');
+  if (options && options.append) container.insertAdjacentHTML('beforeend', html);
+  else container.innerHTML = html;
   attachLazyFade(container);
-  return [...container.querySelectorAll('video[data-poster-src]')];
 }
 
 /** 从点击事件中解析出媒体 id，若无则返回 null */
@@ -111,50 +109,69 @@ export function renderSkeleton(container, count = 6) {
   container.innerHTML = Array.from({ length: count }, () => template.innerHTML).join('');
 }
 
+/* ---------- 相册总览 ---------- */
+
+function albumMarkup(album) {
+  const cover = album.cover && !album.coverMissing
+    ? `<img src="${escapeHtml(album.cover)}" alt="" loading="lazy" decoding="async" />`
+    : '<span class="album-card__placeholder" aria-hidden="true"></span>';
+  return `
+    <button class="album-card" type="button" data-album="${escapeHtml(album.id)}"
+            aria-pressed="false" title="${escapeHtml(album.description)}">
+      <span class="album-card__media">${cover}</span>
+      <span class="album-card__body">
+        <span class="album-card__name">${escapeHtml(album.name)}</span>
+        <span class="album-card__meta">${album.count} 项作品</span>
+      </span>
+    </button>`;
+}
+
+/** @param {object[]} albums 服务端 albums 卡片（id / name / cover / coverMissing / count） */
+export function renderAlbums(container, albums) {
+  container.innerHTML = albums.map(albumMarkup).join('');
+}
+
+/** 同步相册卡片的选中态 */
+export function syncAlbums(container, albumId) {
+  container.querySelectorAll('[data-album]').forEach((node) => {
+    node.setAttribute('aria-pressed', String(node.dataset.album === albumId));
+  });
+}
+
+/* ---------- 筛选 chips ---------- */
+
+function chipMarkup(role, chip) {
+  const prefix = chip.prefix || '';
+  return `<button class="chip" type="button" data-chip="${role}" data-value="${escapeHtml(chip.value)}"
+                  aria-pressed="${chip.pressed ? 'true' : 'false'}">${prefix}${escapeHtml(chip.label)}<span class="chip__count">${chip.count}</span></button>`;
+}
+
 /**
- * 渲染相册总览。
- * @param {HTMLElement} container
- * @param {object[]} albums
- * @param {Map<string, number>} counts
- * @param {(albumId: string) => void} onSelect
+ * 用服务端 facets / types 重建某一组 chips（保留分组标题）。
+ * @param {HTMLElement} container 含 .chipgroup__label 与 chips 的容器
+ * @param {string} role 'type' | 'album' | 'tag'
+ * @param {object[]} chips [{ value, label, count, prefix?, pressed? }]
  */
-export function renderAlbums(container, albums, counts, onSelect) {
-  if (!albums.length) {
-    container.innerHTML = '';
-    return;
-  }
+export function renderChips(container, role, chips) {
+  container.querySelectorAll('.chip').forEach((node) => node.remove());
+  container.insertAdjacentHTML('beforeend', chips.map((chip) => chipMarkup(role, chip)).join(''));
+}
 
-  container.innerHTML = albums
-    .map((album) => {
-      const total = counts.get(album.id) || 0;
-      return `
-        <button class="album-card" type="button" data-album="${escapeHtml(album.id)}"
-                aria-pressed="false" title="${escapeHtml(album.description)}">
-          <span class="album-card__media">
-            ${album.cover ? `<img src="${escapeHtml(album.cover)}" alt="" loading="lazy" decoding="async" />` : ''}
-          </span>
-          <span class="album-card__body">
-            <span class="album-card__name">${escapeHtml(album.name)}</span>
-            <span class="album-card__meta">${total} 项作品</span>
-          </span>
-        </button>`;
-    })
-    .join('');
-
-  container.addEventListener('click', (event) => {
-    const card = event.target.closest('[data-album]');
-    if (card) onSelect(card.dataset.album);
+/** 用服务端回显的 active 同步 chips 选中态 */
+export function syncChips(containers, active) {
+  const tags = (active && active.tags) || [];
+  containers.type.querySelectorAll('[data-chip="type"]').forEach((chip) => {
+    chip.setAttribute('aria-pressed', String(chip.dataset.value === (active && active.type)));
+  });
+  containers.album.querySelectorAll('[data-chip="album"]').forEach((chip) => {
+    chip.setAttribute('aria-pressed', String(chip.dataset.value === (active && active.album)));
+  });
+  containers.tag.querySelectorAll('[data-chip="tag"]').forEach((chip) => {
+    chip.setAttribute('aria-pressed', String(tags.includes(chip.dataset.value)));
   });
 }
 
-/** 同步相册卡片与筛选 chips 的选中态 */
-export function syncSelected(container, activeId) {
-  container.querySelectorAll('[data-album]').forEach((el) => {
-    el.setAttribute('aria-pressed', String(el.dataset.album === activeId));
-  });
-}
-
-/** 更新结果计数文案（照片与视频混合计数） */
-export function renderCount(el, shown, total) {
-  el.textContent = shown === total ? `共 ${total} 项作品` : `匹配 ${shown} / ${total} 项作品`;
+/** 结果计数文案：数字全部来自服务端 meta */
+export function renderCountText(shown, total) {
+  return shown >= total ? `共 ${total} 项作品` : `已显示 ${shown} / ${total} 项作品`;
 }

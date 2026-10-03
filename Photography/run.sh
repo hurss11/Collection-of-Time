@@ -604,6 +604,7 @@ package() {
   for f in admin.py run.sh serve.py index.html favicon.svg README.md DEPLOY.md \
            admin/index.html admin/js/app.js admin/css/admin.css \
            adminlib/store.py adminlib/auth.py adminlib/media.py adminlib/exifread.py \
+           adminlib/query.py adminlib/schema.py \
            tools/fetch_ffmpeg.py tools/make_posters.py \
            data/albums.json data/photos.json data/videos.json; do
     [ -e "$f" ] || missing="$missing $f"

@@ -2,36 +2,54 @@
  * app.js —— 后台界面的控制器
  *
  * 装配：api（后端） + auth（认证视图） + views（渲染） + ui（通用组件）。
- * 这里是唯一持有状态的地方：所有数据变更都先落服务端，再回来重渲染。
+ * 薄客户端：不缓存业务数据、不搜索、不排序、不校验、不格式化；
+ * 只做「按服务端给的参数发请求 → 把响应交给渲染层 → 绑定事件」。
+ *
+ * 本地仅保留三类状态：当前筛选参数（q / sort）、上传中选中的文件、以及
+ * 服务端下发的 schema / 计数 / 工具信息（用于渲染，不是数据副本）。
  */
 
 import { api, setUnauthorizedHandler } from './api.js';
 import * as auth from './auth.js';
-import { CONFIG } from './config.js';
-import { $, $$, collectForm, modal, renderForm, toast } from './ui.js';
+import { CONFIG, assetUrl } from './config.js';
+import { $, $$, clearFieldErrors, escapeHtml, modal, readForm, renderForm, showFieldErrors, toast } from './ui.js';
 import * as views from './views.js';
-import { PANE_META, SCHEMAS } from './views.js';
+import { EMPTY_TEXT, PANE_META } from './views.js';
 
 /* ============================================================
    状态
    ============================================================ */
 
+const COLLECTIONS = ['photos', 'videos', 'albums'];
+
 const state = {
-  albums: [],
-  photos: [],
-  videos: [],
+  schema: null,                                   // GET /api/schema
+  counts: { photos: 0, videos: 0, albums: 0 },    // GET /api/state → counts
   tools: {},
   user: null,
-  query: { photos: '', videos: '' },
-  queue: [],
-  queueMeta: undefined,
+  filters: {                                      // 只保存查询参数，数据交给服务端
+    photos: { q: '', sort: '' },
+    videos: { q: '', sort: '' },
+    albums: { q: '', sort: '' },
+  },
+  selected: [],                                   // 待上传的本地 File 对象
 };
+
+let editing = null;                               // { collection, originalId }
 
 function setHint(text, kind = '') {
   const node = $('#save-hint');
   if (!node) return;
   node.textContent = text;
   node.className = `save-hint${kind ? ` is-${kind}` : ''}`;
+}
+
+function paramsFor(collection) {
+  const { q, sort } = state.filters[collection] || {};
+  const params = {};
+  if (q) params.q = q;
+  if (sort) params.sort = sort;
+  return params;
 }
 
 /* ============================================================
@@ -45,51 +63,71 @@ function switchPane(name) {
   const [title, sub] = PANE_META[name] || ['后台', ''];
   $('#pane-title').textContent = title;
   $('#pane-sub').innerHTML = sub;
-
-  if (name === 'upload') views.renderAlbumOptions(state.albums, $('#up-album')?.value);
 }
 
 /* ============================================================
-   数据加载
+   数据加载（全部来自服务端）
    ============================================================ */
+
+function renderTables(schema, payloads) {
+  const [photos, videos, albums] = payloads;
+
+  for (const collection of COLLECTIONS) {
+    const sort = views.renderSortOptions(
+      $(`#sort-${collection}`), schema.sorts?.[collection], state.filters[collection].sort,
+    );
+    if (sort) state.filters[collection].sort = sort;
+  }
+
+  views.renderTable($('#table-photos'), photos, EMPTY_TEXT.photos);
+  views.renderTable($('#table-videos'), videos, EMPTY_TEXT.videos);
+  views.renderTable($('#table-albums'), albums, EMPTY_TEXT.albums);
+}
 
 async function reload(silent = false) {
   try {
-    const [info, albums, photos, videos] = await Promise.all([
+    const [schema, info, photos, videos, albums] = await Promise.all([
+      api.schema(),
       api.state(),
-      api.list('albums'),
-      api.list('photos'),
-      api.list('videos'),
+      api.items('photos', paramsFor('photos')),
+      api.items('videos', paramsFor('videos')),
+      api.items('albums', paramsFor('albums')),
     ]);
 
-    state.albums = albums.items || [];
-    state.photos = photos.items || [];
-    state.videos = videos.items || [];
+    state.schema = schema;
     state.tools = info.tools || {};
     state.user = info.user || state.user;
+    state.counts = info.counts || state.counts;
 
-    views.renderCounts(state);
+    views.renderCounts(state.counts);
     views.renderTools(state.tools);
-    views.renderStats(state, info);
+    views.renderStats(state.counts, info);
     views.renderIntegrity(info);
     views.renderHistory(info.history);
     views.renderBackups(info.backups);
-    views.renderTable(state, 'photos');
-    views.renderTable(state, 'videos');
-    views.renderTable(state, 'albums');
-    views.renderAlbumOptions(state.albums, $('#up-album')?.value);
+    views.renderUploadOptions(schema.upload || {});
+    renderTables(schema, [photos, videos, albums]);
 
-    if (!$('#current-user')?.textContent || $('#current-user').textContent === '未登录') {
-      $('#current-user').textContent = state.user?.username || '—';
-    }
-    const accountName = $('#account-name');
-    if (accountName) accountName.textContent = state.user?.username || '—';
+    const username = state.user?.username || '—';
+    $('#current-user').textContent = username;
+    $('#account-name').textContent = username;
+    $('#current-user-since').textContent = state.user?.createdAt ? `创建于 ${state.user.createdAt}` : '';
 
     if (!silent) {
-      setHint(`已加载 ${state.photos.length} 照片 / ${state.videos.length} 视频 / ${state.albums.length} 相册`);
+      setHint(`已加载 ${state.counts.photos ?? 0} 照片 / ${state.counts.videos ?? 0} 视频 / ${state.counts.albums ?? 0} 相册`);
     }
   } catch (error) {
     setHint(error.message, 'err');
+    toast(error.message, 'err', 6000);
+  }
+}
+
+/** 只刷新一张表（搜索 / 排序用，参数由服务端解释） */
+async function refreshTable(collection) {
+  try {
+    const payload = await api.items(collection, paramsFor(collection));
+    views.renderTable($(`#table-${collection}`), payload, EMPTY_TEXT[collection]);
+  } catch (error) {
     toast(error.message, 'err', 6000);
   }
 }
@@ -98,73 +136,160 @@ async function reload(silent = false) {
    条目编辑
    ============================================================ */
 
-let editing = null;   // { collection, originalId, isNew, draft }
+async function openPosterDialog(itemId) {
+  let current = '';
+  try {
+    const payload = await api.item('videos', itemId);
+    current = payload.item?.poster || '';
+  } catch (error) {
+    toast(error.message, 'err', 6000);
+    return;
+  }
 
-function openEditor(collection, item, isNew) {
-  const schema = SCHEMAS[collection];
-  const draft = item ? JSON.parse(JSON.stringify(item)) : { id: '', tags: [], exif: {} };
-
-  editing = { collection, originalId: item?.id ?? null, isNew, draft };
+  const preview = current
+    ? `<img class="thumb thumb--wide" id="poster-preview" src="${escapeHtml(assetUrl(current))}" alt="" />`
+    : '<span class="badge badge--missing" id="poster-preview">暂无封面</span>';
 
   modal.open({
-    title: `${isNew ? '新增' : '编辑'}${schema.noun}${isNew ? '' : ` · ${draft.id}`}`,
-    hint: isNew ? '保存后由服务端分配 id 并写入 JSON' : '保存会立即写回数据文件',
-    bodyHtml: renderForm(schema.fields, draft, state.albums),
+    title: `更换封面 · ${itemId}`,
+    hint: '上传一张图片，或从视频里抓一帧',
+    bodyHtml: `
+      <div class="field"><span>当前封面</span>${preview}</div>
+      <label class="field">
+        <span>抓帧时间（秒）</span>
+        <input class="input" id="poster-time" type="number" min="0" step="0.1" value="0" />
+        <span class="muted">0 = 第一帧（默认）</span>
+      </label>
+      <div class="row">
+        <button class="btn btn--primary" id="poster-capture" type="button">抓取该帧</button>
+        <label class="btn" for="poster-file">上传封面图片…</label>
+        <input id="poster-file" type="file" accept="image/*" hidden />
+      </div>`,
+    onMount: (root) => {
+      const busy = (on) => {
+        root.querySelectorAll('button, input').forEach((node) => { node.disabled = on; });
+      };
+
+      const apply = async (form, okText) => {
+        busy(true);
+        try {
+          const payload = await api.setPoster(itemId, form);
+          (payload.warnings || []).forEach((warning) => toast(warning, 'warn', 5000));
+          toast(`${okText}：${payload.posterUrl || ''}`, 'ok');
+          modal.close();
+          await reload(true);
+        } catch (error) {
+          toast(error.message, 'err', 6000);
+          busy(false);
+        }
+      };
+
+      root.querySelector('#poster-capture').addEventListener('click', () => {
+        const form = new FormData();
+        form.append('time', root.querySelector('#poster-time').value || '0');
+        apply(form, '封面已更新');
+      });
+
+      root.querySelector('#poster-file').addEventListener('change', (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        const form = new FormData();
+        form.append('file', file, file.name);
+        apply(form, '封面已上传');
+      });
+    },
+  });
+}
+
+async function openEditor(collection, id, isNew) {
+  const fields = state.schema.collections[collection]?.fields || [];
+  const albums = state.schema.upload?.albums || [];
+  const noun = state.schema.nouns?.[collection] || '条目';
+
+  let values = {};
+  if (!isNew) {
+    try {
+      const payload = await api.item(collection, id);       // values 已摊平，直接填控件
+      values = payload.values || {};
+    } catch (error) {
+      toast(error.message, 'err', 6000);
+      return;
+    }
+  }
+
+  editing = { collection, originalId: isNew ? null : id };
+  modal.open({
+    title: `${isNew ? '新增' : '编辑'}${noun}${isNew ? '' : ` · ${id}`}`,
+    hint: isNew ? '保存后由服务端分配 id 并写入数据文件' : '保存会立即写回数据文件',
+    bodyHtml: renderForm(fields, values, albums),
     onSave: saveEditor,
   });
 }
 
+/**
+ * 保存一条记录。
+ *
+ * 契约：POST /api/items/{collection}，请求体是扁平表单值。
+ * 服务端负责归一化与校验，并且**保留 payload 里的 id**——photos / videos 的 schema
+ * 虽然没有 id 字段，服务端仍会单独处理它，所以编辑是原地更新，不会新增重复条目。
+ * 相册例外：id 本身就是它的字段，改了 id 等于换了一个键，旧记录需要手动删掉。
+ */
+async function persist(collection, originalId, values) {
+  const fields = state.schema.collections[collection]?.fields || [];
+  const idIsField = fields.some((field) => field.key === 'id');
+  const payload = originalId && !idIsField ? { ...values, id: originalId } : values;
+
+  const result = await api.saveItem(collection, payload);
+  const saved = result.item || {};
+
+  if (originalId && idIsField && String(saved.id) !== String(originalId)) {
+    await api.removeItem(collection, originalId, false);
+  }
+  return result;
+}
+
 async function saveEditor() {
   if (!editing) return;
-  const { collection, originalId, isNew, draft } = editing;
-
-  let payload;
-  try {
-    payload = collectForm($('#modal-form'), SCHEMAS[collection].fields, draft);
-  } catch (error) {
-    toast(error.message, 'err');
-    return;
-  }
+  const { collection, originalId } = editing;
+  const form = $('#modal-form');
+  clearFieldErrors(form);
+  const values = readForm(form);                               // 原样扁平值，不做类型转换
 
   modal.setBusy(true);
   try {
-    let result;
-    if (isNew && !payload.id) {
-      result = await api.save(collection, payload);
-    } else if (!isNew && originalId && payload.id !== originalId) {
-      // 改了 id：整表替换，保持原有顺序
-      const list = state[collection];
-      const index = list.findIndex((i) => i.id === originalId);
-      const next = [...list];
-      next[index] = payload;
-      result = await api.replaceAll(collection, next);
-    } else {
-      result = await api.save(collection, payload);
-    }
+    const result = await persist(collection, originalId, values);
 
-    (result.warnings || []).forEach((w) => toast(w, 'warn', 5000));
-    toast(isNew ? `已新增 ${result.item?.id ?? ''}` : `已保存 ${payload.id}`, 'ok');
+    (result.warnings || []).forEach((warning) => toast(warning, 'warn', 5000));
+    toast(`已保存 ${result.item?.id ?? ''}`, 'ok');
     modal.close();
     editing = null;
     await reload(true);
     setHint(`已保存于 ${new Date().toLocaleTimeString()}`, 'ok');
   } catch (error) {
-    toast(error.message, 'err', 6000);
-    setHint(error.message, 'err');
+    const fieldErrors = error?.payload?.fieldErrors;
+    if (error?.status === 400 && Array.isArray(fieldErrors) && fieldErrors.length) {
+      const marked = showFieldErrors(form, fieldErrors);
+      setHint('提交内容有误，请检查标红的字段', 'err');
+      toast(marked ? error.message : `${error.message}（未找到对应控件）`, 'err', 6000);
+    } else {
+      toast(error.message, 'err', 6000);
+      setHint(error.message, 'err');
+    }
   } finally {
     modal.setBusy(false);
   }
 }
 
 async function removeItem(collection, id) {
-  const noun = SCHEMAS[collection].noun;
+  const noun = state.schema?.nouns?.[collection] || '条目';
   if (!window.confirm(`确定删除${noun} ${id} 吗？\n（JSON 条目会被移除，媒体文件默认保留）`)) return;
 
   const alsoFile = ['photos', 'videos'].includes(collection)
     && window.confirm('是否同时删除对应的媒体文件？\n确定 = 一并删除文件，取消 = 只删除记录');
 
   try {
-    const result = await api.remove(collection, id, alsoFile);
+    const result = await api.removeItem(collection, id, alsoFile);
     const removed = result.removedFiles?.length ?? 0;
     toast(`已删除 ${id}${removed ? `，同时清理 ${removed} 个文件` : ''}`, 'ok');
     await reload(true);
@@ -174,27 +299,50 @@ async function removeItem(collection, id) {
 }
 
 /* ============================================================
-   上传
+   上传：本地只负责按 maxBatchBytes 分批，其余交给服务端
    ============================================================ */
 
 function queueFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return;
 
-  state.queue.push(...files);
-  views.renderQueue(state.queue, state.queueMeta);
+  state.selected.push(...files);
+  views.renderQueue(state.selected);
   $('#up-start').disabled = false;
 }
 
+/** 按服务端给出的单批上限切分文件（单文件超限时自己成批，由服务端报错） */
+function makeBatches(files, maxBatchBytes) {
+  const limit = Number(maxBatchBytes) > 0 ? Number(maxBatchBytes) : Infinity;
+  const batches = [];
+  let current = [];
+  let size = 0;
+
+  for (const file of files) {
+    if (current.length && size + file.size > limit) {
+      batches.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(file);
+    size += file.size;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
 async function startUpload() {
-  if (!state.queue.length) return;
+  if (!state.selected.length) return;
 
   const button = $('#up-start');
   button.disabled = true;
   button.textContent = '上传中…';
   $('#upload-result').hidden = true;
 
+  const groups = makeBatches(state.selected, state.schema?.upload?.maxBatchBytes);
+  const cover = $('#up-cover')?.files?.[0] || null;
   const options = {
+    kind: 'auto',
     album: $('#up-album').value,
     tags: $('#up-tags').value,
     date: $('#up-date').value,
@@ -206,41 +354,46 @@ async function startUpload() {
   };
 
   const results = [];
-  state.queueMeta = state.queue.map(() => ({ state: '排队中', className: '' }));
+  const summary = { total: 0, ok: 0, failed: 0 };
 
-  for (const [index, file] of state.queue.entries()) {
-    state.queueMeta[index] = { state: '上传中…', className: 'is-busy' };
-    views.renderQueue(state.queue, state.queueMeta);
+  try {
+    for (const [index, group] of groups.entries()) {
+      const form = new FormData();
+      // 字段名 files 可重复，一次请求带一批文件
+      group.forEach((file) => form.append('files', file, file.name));
+      Object.entries(options).forEach(([key, value]) => form.append(key, value));
+      // 选了封面图片就带上：服务端把它作为本批视频的封面（否则抓第一帧）
+      if (cover) form.append('posterFile', cover, cover.name);
 
-    const form = new FormData();
-    form.append('file', file);
-    form.append('kind', 'auto');
-    Object.entries(options).forEach(([key, value]) => form.append(key, value));
-
-    try {
+      setHint(`正在上传第 ${index + 1} / ${groups.length} 批…`);
       const payload = await api.upload('/api/upload', form);
-      state.queueMeta[index] = { state: `✓ ${payload.item.id}`, className: 'is-ok' };
-      results.push({ file: file.name, ok: true, item: payload.item, warnings: payload.warnings || [] });
-    } catch (error) {
-      state.queueMeta[index] = { state: `✗ ${error.message}`, className: 'is-err' };
-      results.push({ file: file.name, ok: false, error: error.message });
+
+      results.push(...(payload.results || []));
+      const batch = payload.summary || {};
+      summary.total += batch.total ?? 0;
+      summary.ok += batch.ok ?? 0;
+      summary.failed += batch.failed ?? 0;
     }
-    views.renderQueue(state.queue, state.queueMeta);
+
+    views.renderUploadResult({ results, summary });
+    toast(`上传结束：成功 ${summary.ok} / ${summary.total}`, summary.failed ? 'warn' : 'ok');
+  } catch (error) {
+    toast(`上传失败：${error.message}`, 'err', 6000);
+    setHint(error.message, 'err');
+    if (results.length) views.renderUploadResult({ results, summary });
+  } finally {
+    state.selected = [];
+    views.renderQueue(state.selected);
+    const coverInput = $('#up-cover');
+    if (coverInput) coverInput.value = '';
+    button.textContent = '开始上传';
+    button.disabled = true;
+    await reload(true);
   }
-
-  views.renderUploadResult(results);
-  const failed = results.filter((r) => !r.ok).length;
-  toast(`上传结束：成功 ${results.length - failed} / ${results.length}`, failed ? 'warn' : 'ok');
-
-  state.queue = [];
-  state.queueMeta = undefined;
-  button.textContent = '开始上传';
-  button.disabled = true;
-  await reload(true);
 }
 
 /* ============================================================
-   备份
+   备份 / 导入导出
    ============================================================ */
 
 async function exportBundle() {
@@ -306,24 +459,27 @@ function bindEvents() {
     const edit = event.target.closest('[data-edit]');
     if (edit) {
       const [collection, id] = edit.dataset.edit.split(':');
-      const item = state[collection].find((i) => i.id === id);
-      if (item) openEditor(collection, item, false);
+      if (collection && id) openEditor(collection, id, false);
       return;
     }
 
     const del = event.target.closest('[data-del]');
     if (del) {
       const [collection, id] = del.dataset.del.split(':');
-      removeItem(collection, id);
+      if (collection && id) removeItem(collection, id);
+      return;
+    }
+
+    const poster = event.target.closest('[data-poster]');
+    if (poster) {
+      const [, id] = poster.dataset.poster.split(':');
+      if (id) openPosterDialog(id);
       return;
     }
 
     const add = event.target.closest('[data-action="add"]');
     if (add) {
-      const collection = add.dataset.collection;
-      openEditor(collection, collection === 'albums'
-        ? { id: '', name: '', description: '', cover: '' }
-        : { title: '', album: '', tags: [] }, true);
+      openEditor(add.dataset.collection, null, true);
       return;
     }
 
@@ -344,15 +500,21 @@ function bindEvents() {
     }
   });
 
-  // 表格筛选
-  $('#search-photos').addEventListener('input', (event) => {
-    state.query.photos = event.target.value;
-    views.renderTable(state, 'photos');
-  });
-  $('#search-videos').addEventListener('input', (event) => {
-    state.query.videos = event.target.value;
-    views.renderTable(state, 'videos');
-  });
+  // 搜索 / 排序：参数发给服务端，前端只负责展示结果
+  for (const collection of COLLECTIONS) {
+    const search = $(`#search-${collection}`);
+    let timer = 0;
+    search.addEventListener('input', () => {
+      state.filters[collection].q = search.value;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => refreshTable(collection), 260);
+    });
+
+    $(`#sort-${collection}`).addEventListener('change', (event) => {
+      state.filters[collection].sort = event.target.value;
+      refreshTable(collection);
+    });
+  }
 
   // 上传区
   const dropzone = $('#dropzone');
@@ -383,9 +545,9 @@ function bindEvents() {
   $('#queue').addEventListener('click', (event) => {
     const drop = event.target.closest('[data-drop]');
     if (!drop) return;
-    state.queue.splice(Number(drop.dataset.drop), 1);
-    views.renderQueue(state.queue, state.queueMeta);
-    $('#up-start').disabled = state.queue.length === 0;
+    state.selected.splice(Number(drop.dataset.drop), 1);
+    views.renderQueue(state.selected);
+    $('#up-start').disabled = state.selected.length === 0;
   });
 
   $('#up-start').addEventListener('click', startUpload);
@@ -398,8 +560,9 @@ function bindEvents() {
     if (file) importBundle(file);
   });
 
-  // 账号
+  // 账号（侧边栏用户卡片与「账号」页各有一个入口）
   $('#btn-change-password').addEventListener('click', auth.changePassword);
+  $('#btn-change-password-side').addEventListener('click', auth.changePassword);
   $('#btn-logout').addEventListener('click', () => {
     if (window.confirm('确定退出登录吗？')) auth.logout();
   });
@@ -410,11 +573,20 @@ function bindEvents() {
    ============================================================ */
 
 function resetState() {
-  state.albums = [];
-  state.photos = [];
-  state.videos = [];
-  state.queue = [];
-  state.query = { photos: '', videos: '' };
+  state.schema = null;
+  state.counts = { photos: 0, videos: 0, albums: 0 };
+  state.user = null;
+  state.selected = [];
+  state.filters = {
+    photos: { q: '', sort: '' },
+    videos: { q: '', sort: '' },
+    albums: { q: '', sort: '' },
+  };
+  editing = null;
+  for (const collection of COLLECTIONS) {
+    const search = $(`#search-${collection}`);
+    if (search) search.value = '';
+  }
   modal.close();
 }
 

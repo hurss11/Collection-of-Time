@@ -2,6 +2,8 @@
  * ui.js —— 通用 UI 层
  *
  * 只放与业务无关的东西：DOM 选择器、转义、提示、弹窗、schema 驱动的表单渲染。
+ * 表单值一律「扁平进出」：读出来是 { 'exif.camera': '...' }，写进去也是同样形状，
+ * 归一化（exif 嵌套、数字、数组）与校验都由服务端负责。
  */
 
 export const $ = (selector, scope = document) => scope.querySelector(selector);
@@ -105,58 +107,29 @@ export const modal = {
 };
 
 /* ============================================================
-   表单：schema 驱动
+   表单：schema 驱动的「扁平」读写
    ============================================================ */
 
-/** 读取嵌套字段：getPath(obj, 'exif.camera') */
-export function getPath(object, path) {
-  return path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), object);
-}
-
-/** 写入嵌套字段，中间层不存在时自动创建 */
-export function setPath(object, path, value) {
-  const keys = path.split('.');
-  const last = keys.pop();
-  const target = keys.reduce((acc, key) => {
-    if (typeof acc[key] !== 'object' || acc[key] === null) acc[key] = {};
-    return acc[key];
-  }, object);
-  target[last] = value;
-}
-
-/** 递归清掉 undefined，并移除空的 exif 对象 */
-export function pruneEmpty(object) {
-  const walk = (node) => {
-    for (const [key, value] of Object.entries(node)) {
-      if (value === undefined) delete node[key];
-      else if (value && typeof value === 'object' && !Array.isArray(value)) walk(value);
-    }
-  };
-  walk(object);
-
-  if (object.exif && !Object.keys(object.exif).length) delete object.exif;
-  return object;
-}
-
 function fieldMarkup(field, value, albums) {
-  const common = `data-key="${field.key}" class="input"`;
+  const common = `data-key="${escapeHtml(field.key)}" class="input"`;
   const hint = field.hint ? `<span class="muted">${escapeHtml(field.hint)}</span>` : '';
   const mono = field.mono ? ' style="font-family:var(--font-mono);font-size:12.5px"' : '';
   const label = `<span>${escapeHtml(field.label)}${field.required ? ' <i class="req">*</i>' : ''}</span>`;
 
   if (field.type === 'select') {
-    const options = field.options
+    const options = (field.options || [])
       .map((o) => `<option value="${escapeHtml(o.value)}"${o.value === value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`)
       .join('');
     return `<label class="field">${label}<select ${common}>${options}</select>${hint}</label>`;
   }
 
   if (field.type === 'album') {
+    const list = albums || [];
     const options = ['<option value="">（未指定）</option>'];
-    for (const album of albums) {
-      options.push(`<option value="${escapeHtml(album.id)}"${album.id === value ? ' selected' : ''}>${escapeHtml(album.name)}（${escapeHtml(album.id)}）</option>`);
+    for (const album of list) {
+      options.push(`<option value="${escapeHtml(album.value)}"${album.value === value ? ' selected' : ''}>${escapeHtml(album.label)}（${escapeHtml(album.value)}）</option>`);
     }
-    if (value && !albums.some((a) => a.id === value)) {
+    if (value && !list.some((a) => a.value === value)) {
       options.push(`<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}（相册不存在）</option>`);
     }
     return `<label class="field">${label}<select ${common}>${options.join('')}</select>${hint}</label>`;
@@ -175,15 +148,16 @@ function fieldMarkup(field, value, albums) {
 
 /**
  * 依据 schema 生成表单 HTML（支持 group 分组）。
- * @param {object[]} fields
- * @param {object} draft 当前数据草稿
- * @param {object[]} albums 供 album 类型下拉使用
+ * @param {object[]} fields 服务端 schema.fields
+ * @param {object} values 已摊平的表单值（GET /api/item 的 values）
+ * @param {object[]} albums 相册选项，[{value,label}]
  */
-export function renderForm(fields, draft, albums = []) {
+export function renderForm(fields, values = {}, albums = []) {
+  // tags 在 values 里是数组，控件里用逗号串表示
   const valueOf = (field) => {
-    const raw = getPath(draft, field.key);
-    if (field.type === 'tags') return (Array.isArray(raw) ? raw : []).join(', ');
-    return raw;
+    const raw = values[field.key];
+    if (field.type === 'tags') return Array.isArray(raw) ? raw.join(', ') : raw ?? '';
+    return raw ?? '';
   };
 
   const plain = fields.filter((f) => !f.group);
@@ -200,38 +174,47 @@ export function renderForm(fields, draft, albums = []) {
 }
 
 /**
- * 从表单读值并写回草稿。
- * @param {HTMLElement} scope 表单容器
- * @param {object[]} fields
- * @param {object} draft
+ * 读取表单值：原样取出每个控件的字符串，不做任何类型转换。
+ * 服务端按 schema 归一化（数字 / 标签数组 / exif.* 嵌套）并校验。
  */
-export function collectForm(scope, fields, draft) {
-  const inputs = new Map($$('[data-key]', scope).map((node) => [node.dataset.key, node]));
+export function readForm(scope) {
+  const values = {};
+  for (const node of $$('[data-key]', scope)) values[node.dataset.key] = node.value;
+  return values;
+}
 
-  for (const field of fields) {
-    const node = inputs.get(field.key);
+/** 清掉上一次的字段级错误标记 */
+export function clearFieldErrors(scope) {
+  for (const node of $$('[data-key]', scope)) {
+    node.classList.remove('is-invalid');
+    node.parentElement?.querySelectorAll('.field__error').forEach((el) => el.remove());
+  }
+}
+
+/**
+ * 把服务端的 fieldErrors（{field, message}，field 为扁平键）标到对应控件上。
+ * @returns {boolean} 是否至少标红了一个控件
+ */
+export function showFieldErrors(scope, errors) {
+  clearFieldErrors(scope);
+  let first = null;
+
+  for (const item of errors || []) {
+    const key = String(item?.field ?? '');
+    if (!key) continue;
+    const node = $$('[data-key]', scope).find((el) => el.dataset.key === key);
     if (!node) continue;
 
-    const raw = node.value;
-
-    if (field.required && !String(raw).trim()) {
-      throw new Error(`「${field.label}」不能为空`);
-    }
-
-    if (field.type === 'number') {
-      setPath(draft, field.key, raw === '' ? undefined : Number(raw));
-    } else if (field.type === 'tags') {
-      const tags = raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
-      if (tags.length) setPath(draft, field.key, tags);
-      else delete draft.tags;
-    } else if (raw === '') {
-      setPath(draft, field.key, undefined);
-    } else {
-      setPath(draft, field.key, raw);
-    }
+    node.classList.add('is-invalid');
+    const note = document.createElement('span');
+    note.className = 'field__error';
+    note.textContent = item.message || '该项有误';
+    node.after(note);
+    first = first || node;
   }
 
-  return pruneEmpty(draft);
+  if (first) first.focus();
+  return Boolean(first);
 }
 
 /* ============================================================

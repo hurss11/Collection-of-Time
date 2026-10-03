@@ -278,6 +278,10 @@ main {
   padding: 6px 13px;
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: all 0.18s var(--ease);
 }
 
@@ -339,6 +343,13 @@ main {
 .album-card__media { aspect-ratio: 4 / 3; overflow: hidden; background: var(--bg-soft); }
 .album-card__media img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s var(--ease); }
 .album-card:hover .album-card__media img { transform: scale(1.06); }
+
+.album-card__placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(45deg, var(--bg-soft), var(--bg-soft) 12px, var(--bg-elev) 12px, var(--bg-elev) 24px);
+}
 
 .album-card__body { padding: 12px 14px 14px; }
 .album-card__name { font-size: 15px; font-weight: 600; }
@@ -411,25 +422,24 @@ main {
 
 /* ---------- 视频卡片 ---------- */
 
-/* 运行时抓帧用的 <video>：静音、不可交互，仅作为封面显示 */
-.card__video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  opacity: 0;
-  transition: transform 0.55s var(--ease), opacity 0.4s var(--ease);
-  pointer-events: none;
-  background: var(--bg-soft);
+/* 缺失标记（封面缺失 / 视频文件缺失），由服务端字段驱动 */
+.card__flags {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.card__video.is-ready { opacity: 1; }
-.card:hover .card__video { transform: scale(1.05); }
-
-/* 视频文件缺失时的降级底色 */
-.card__video.is-missing {
-  opacity: 1;
-  background: repeating-linear-gradient(45deg, var(--bg-soft), var(--bg-soft) 12px, var(--bg-elev) 12px, var(--bg-elev) 24px);
+.card__flag {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(180, 40, 40, 0.78);
+  backdrop-filter: blur(6px);
 }
 
 .card__placeholder {
@@ -485,9 +495,10 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.card__body { padding: 12px 14px 14px; display: grid; gap: 6px; }
-.card__title { font-size: 15px; font-weight: 600; }
-.card__meta { font-size: 12px; color: var(--text-mute); display: flex; gap: 8px; flex-wrap: wrap; }
+.card__body { padding: 12px 14px 14px; display: grid; gap: 6px; min-width: 0; }
+.card__title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.card__meta { font-size: 12px; color: var(--text-mute); display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.card__meta--date { font-variant-numeric: tabular-nums; }
 
 .card__tags { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -530,6 +541,24 @@ main {
 
 .empty-state__glyph { font-size: 34px; opacity: 0.55; }
 
+/* 分页：加载更多（页码与 hasMore 来自服务端 meta） */
+.load-more-wrap { display: grid; justify-items: center; margin-top: 26px; }
+
+.load-more {
+  min-height: 44px;
+  padding: 10px 26px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--text-soft);
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
+}
+
+.load-more:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+.load-more[disabled] { opacity: 0.55; cursor: progress; }
+
 /* ============================================================
    页脚
    ============================================================ */
@@ -555,16 +584,64 @@ main {
 }
 
 /* ============================================================
-   响应式
+   响应式（手机优先的可用性）
    ============================================================ */
+@media (max-width: 860px) {
+  .site-header { gap: 10px; padding: 10px 16px; }
+  .site-nav { gap: 2px; }
+  .site-nav a { padding: 10px 10px; font-size: 13px; }
+  .icon-btn { width: 44px; height: 44px; margin-left: 4px; }
+
+  /* 工具栏不再吸顶，搜索与排序各占满一行 */
+  .toolbar {
+    position: static;
+    margin-top: 30px;
+    padding: 14px;
+    border-radius: var(--radius);
+    gap: 12px;
+  }
+
+  .toolbar__row { gap: 10px; }
+  .search { flex: 1 1 100%; padding: 12px 14px; }
+
+  .select { flex: 1 1 100%; justify-content: space-between; }
+  .select select { flex: 1; min-width: 0; min-height: 44px; border-radius: var(--radius-sm); }
+
+  /* chips 在容器内部换行 / 纵向滚动，绝不撑出横向页面滚动 */
+  .chipgroup {
+    width: 100%;
+    max-height: 116px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .chip { min-height: 36px; padding: 8px 14px; }
+
+  .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .album-card__body { padding: 10px 12px 12px; }
+
+  .hero { padding: 34px 0 4px; }
+  .hero__desc { font-size: 15px; margin: 14px 0 22px; }
+  .hero__stats { gap: 10px; }
+  .hero__stats > div { flex: 1 1 90px; min-width: 0; padding: 10px 14px; }
+
+  .section-title { margin: 34px 0 14px; }
+}
+
 @media (max-width: 720px) {
   .site-nav a { display: none; }
-  .toolbar { position: static; }
-  .gallery { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; }
-  .album-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-  .hero__stats > div { flex: 1 1 90px; min-width: 0; padding: 10px 14px; }
+}
+
+@media (max-width: 480px) {
+  main { padding: 0 14px 56px; }
+  .gallery { grid-template-columns: 1fr; }
+  .card__media { aspect-ratio: 4 / 3; }
+  .hero__title { font-size: clamp(30px, 9vw, 42px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  html { scroll-behavior: auto; }
 }

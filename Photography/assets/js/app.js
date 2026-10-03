@@ -1,15 +1,27 @@
 /**
- * app.js —— 应用入口：装配状态、渲染与交互
+ * app.js —— 应用入口
  *
- * 数据流：
- *   loadData() → 全局 state.items → filterMedia() → renderGallery() → attachVideoPosters()
+ * 数据流：fetchSite() → 渲染统计 / 相册 / chips / 排序项
+ *         fetchGallery(筛选 + 分页) → 渲染作品网格 → 灯箱
+ *
+ * 筛选、排序、分页、统计、缺失标记、EXIF 全部由服务端算好，
+ * 前端只做三件事：取值 → 拼 HTML → 绑事件。
  */
 
-import { loadData, collectTags, countByAlbum, countByType, escapeHtml, MEDIA_TYPE } from './data.js';
-import { filterMedia, hasActiveFilters } from './search.js';
-import { renderGallery, renderAlbums, renderSkeleton, renderCount, resolveCardId } from './gallery.js';
+import { fetchSite, fetchGallery, escapeHtml } from './data.js';
+import {
+  renderCards,
+  renderAlbums,
+  renderChips,
+  renderSkeleton,
+  renderCountText,
+  syncAlbums,
+  syncChips,
+  resolveCardId,
+} from './gallery.js';
 import { createLightbox } from './lightbox.js';
-import { attachVideoPosters } from './poster.js';
+
+const PAGE_SIZE = 24;
 
 /* ---------- DOM ---------- */
 const el = {
@@ -22,188 +34,193 @@ const el = {
   searchClear: document.getElementById('search-clear'),
   sort: document.getElementById('sort-select'),
   reset: document.getElementById('filter-reset'),
+  loadMore: document.getElementById('load-more'),
   count: document.getElementById('result-count'),
   empty: document.getElementById('empty-state'),
   themeToggle: document.getElementById('theme-toggle'),
   year: document.getElementById('year'),
   stats: {
-    photos: document.querySelector('[data-stat="photos"]'),
+    works: document.querySelector('[data-stat="works"]'),
     albums: document.querySelector('[data-stat="albums"]'),
     tags: document.querySelector('[data-stat="tags"]'),
   },
 };
 
-/** 类型筛选的可选项 */
-const TYPE_OPTIONS = [
-  { value: 'all', label: '全部' },
-  { value: MEDIA_TYPE.PHOTO, label: '照片' },
-  { value: MEDIA_TYPE.VIDEO, label: '视频' },
-];
-
-/* ---------- 状态 ---------- */
+/* ---------- 状态：只存「当前请求条件」与服务端回显 ---------- */
 const state = {
-  albums: [],
-  /** 照片 + 视频的混合列表 */
+  filters: { q: '', type: 'all', album: '', tags: [], sort: 'date-desc' },
+  defaultSort: 'date-desc',
   items: [],
-  tags: [],
-  typeCounts: { all: 0, photo: 0, video: 0 },
-  filters: { query: '', tags: [], albumId: null, type: 'all', sort: 'date-desc' },
-  visible: [],
+  meta: null,
+  active: null,
+  page: 1,
+  token: 0,
 };
 
 const lightbox = createLightbox(document.getElementById('lightbox'));
 
-/* ---------- 渲染 ---------- */
-
-function currentVisible() {
-  return filterMedia(state.items, state.filters);
+/** 重置按钮的可用性直接取服务端回显的 active */
+function apiHasActive(active) {
+  if (!active) return false;
+  const tags = active.tags || [];
+  return Boolean(active.q) || active.type !== 'all' || Boolean(active.album) || tags.length > 0;
 }
 
-function render() {
-  state.visible = currentVisible();
+/* ---------- 渲染：首屏 ---------- */
 
-  const pendingPosters = renderGallery(el.gallery, state.visible);
-  attachVideoPosters(pendingPosters);
-
-  renderCount(el.count, state.visible.length, state.items.length);
-  el.empty.hidden = state.visible.length > 0;
-  el.reset.disabled = !hasActiveFilters(state.filters);
-
-  // 同步相册选中态
-  el.albums.querySelectorAll('[data-album]').forEach((node) => {
-    node.setAttribute('aria-pressed', String(node.dataset.album === state.filters.albumId));
-  });
+function renderSortOptions(sorts) {
+  el.sort.innerHTML = sorts
+    .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
+    .join('');
+  el.sort.value = state.filters.sort;
 }
 
-/** 渲染筛选 chips（类型 / 相册 / 标签） */
-function renderFilters() {
-  const albumCounts = countByAlbum(state.items);
+function renderSite(site) {
+  state.defaultSort = site.sorts.length ? site.sorts[0].value : 'date-desc';
+  el.stats.works.textContent = String(site.stats.photos + site.stats.videos);
+  el.stats.albums.textContent = String(site.stats.albums);
+  el.stats.tags.textContent = String(site.stats.tags);
 
-  el.typeFilter.querySelectorAll('.chip').forEach((n) => n.remove());
-  el.typeFilter.insertAdjacentHTML(
-    'beforeend',
-    TYPE_OPTIONS.map(
-      (option) => `<button class="chip" type="button" data-chip="type" data-value="${option.value}"
-                    aria-pressed="${option.value === 'all'}">${option.label}<span class="chip__count">${
-                      state.typeCounts[option.value] || 0
-                    }</span></button>`,
-    ).join(''),
-  );
+  renderSortOptions(site.sorts);
+  renderAlbums(el.albums, site.albums);
 
-  el.albumFilter.querySelectorAll('.chip').forEach((n) => n.remove());
-  el.albumFilter.insertAdjacentHTML(
-    'beforeend',
-    state.albums
-      .map(
-        (album) => `<button class="chip" type="button" data-chip="album" data-value="${escapeHtml(album.id)}"
-                    aria-pressed="false">${escapeHtml(album.name)}<span class="chip__count">${
-                      albumCounts.get(album.id) || 0
-                    }</span></button>`,
-      )
-      .join(''),
+  const typeCounts = {
+    all: site.stats.photos + site.stats.videos,
+    photo: site.stats.photos,
+    video: site.stats.videos,
+  };
+  renderChips(
+    el.typeFilter,
+    'type',
+    site.types.map((item) => ({ ...item, count: typeCounts[item.value] ?? 0 })),
   );
-
-  el.tagFilter.querySelectorAll('.chip').forEach((n) => n.remove());
-  el.tagFilter.insertAdjacentHTML(
-    'beforeend',
-    state.tags
-      .slice(0, 12)
-      .map(
-        (item) => `<button class="chip" type="button" data-chip="tag" data-value="${escapeHtml(item.tag)}"
-                    aria-pressed="false">#${escapeHtml(item.tag)}<span class="chip__count">${
-                      item.count
-                    }</span></button>`,
-      )
-      .join(''),
-  );
+  renderChips(el.albumFilter, 'album', site.facets.albums);
+  renderChips(el.tagFilter, 'tag', site.facets.tags.map((item) => ({ ...item, prefix: '#' })));
 }
 
-function syncFilterChips() {
-  el.typeFilter.querySelectorAll('[data-chip="type"]').forEach((chip) => {
-    chip.setAttribute('aria-pressed', String(chip.dataset.value === state.filters.type));
-  });
-  el.albumFilter.querySelectorAll('[data-chip="album"]').forEach((chip) => {
-    chip.setAttribute('aria-pressed', String(chip.dataset.value === state.filters.albumId));
-  });
-  el.tagFilter.querySelectorAll('[data-chip="tag"]').forEach((chip) => {
-    chip.setAttribute('aria-pressed', String(state.filters.tags.includes(chip.dataset.value)));
-  });
+/* ---------- 渲染：作品列表 ---------- */
+
+function renderMetaView() {
+  const shown = state.items.length;
+  const total = state.meta ? state.meta.total : shown;
+
+  el.count.textContent = renderCountText(shown, total);
+  el.empty.hidden = shown > 0;
+  el.loadMore.hidden = !(state.meta && state.meta.hasMore);
+  el.loadMore.disabled = false;
+  el.reset.disabled = !apiHasActive(state.active);
+}
+
+function showError(message) {
+  el.gallery.innerHTML = '';
+  el.empty.hidden = false;
+  el.empty.innerHTML = `<span class="empty-state__glyph">!</span>${escapeHtml(message)}`;
+  el.count.textContent = '';
+  el.loadMore.hidden = true;
+}
+
+async function refresh(options) {
+  const append = Boolean(options && options.append);
+  const token = ++state.token;
+
+  try {
+    const payload = await fetchGallery({
+      q: state.filters.q,
+      type: state.filters.type,
+      album: state.filters.album,
+      tags: state.filters.tags.join(','),
+      sort: state.filters.sort,
+      page: state.page,
+      pageSize: PAGE_SIZE,
+    });
+    if (token !== state.token) return; // 只采用最后一次请求的结果
+
+    state.meta = payload.meta;
+    state.active = payload.active;
+    state.items = append ? state.items.concat(payload.items) : payload.items;
+
+    renderCards(el.gallery, payload.items, { append });
+    syncChips({ type: el.typeFilter, album: el.albumFilter, tag: el.tagFilter }, state.active);
+    syncAlbums(el.albums, state.active.album);
+    renderMetaView();
+  } catch (error) {
+    if (token !== state.token) return;
+    showError(error.message);
+  }
+}
+
+/** 修改筛选条件：回到第 1 页重新请求 */
+function setFilter(patch) {
+  state.filters = { ...state.filters, ...patch };
+  state.page = 1;
+  refresh();
 }
 
 /* ---------- 交互 ---------- */
 
 function bindEvents() {
-  // 搜索（带 200ms 防抖）
+  // 搜索（防抖 250ms，服务端负责匹配）
   let timer = 0;
   el.search.addEventListener('input', () => {
     el.searchClear.hidden = !el.search.value;
     window.clearTimeout(timer);
-    timer = window.setTimeout(() => {
-      state.filters.query = el.search.value;
-      render();
-    }, 200);
+    timer = window.setTimeout(() => setFilter({ q: el.search.value }), 250);
   });
 
   el.searchClear.addEventListener('click', () => {
     el.search.value = '';
     el.searchClear.hidden = true;
-    state.filters.query = '';
-    render();
+    setFilter({ q: '' });
     el.search.focus();
   });
 
-  el.sort.addEventListener('change', () => {
-    state.filters.sort = el.sort.value;
-    render();
-  });
+  el.sort.addEventListener('change', () => setFilter({ sort: el.sort.value }));
 
   el.reset.addEventListener('click', () => {
-    state.filters = { query: '', tags: [], albumId: null, type: 'all', sort: el.sort.value };
+    state.filters = {
+      q: '',
+      type: 'all',
+      album: '',
+      tags: [],
+      sort: state.defaultSort,
+    };
     el.search.value = '';
     el.searchClear.hidden = true;
-    syncFilterChips();
-    render();
+    el.sort.value = state.defaultSort;
+    state.page = 1;
+    refresh();
   });
 
-  // 类型 chips（全部 / 照片 / 视频，单选）
+  // 类型 chips（单选）
   el.typeFilter.addEventListener('click', (event) => {
     const chip = event.target.closest('[data-chip="type"]');
-    if (!chip) return;
-    state.filters.type = chip.dataset.value;
-    syncFilterChips();
-    render();
+    if (chip) setFilter({ type: chip.dataset.value });
   });
 
-  // 相册 chips（再次点击取消选中）
+  // 相册 chips（再次点击取消）
   el.albumFilter.addEventListener('click', (event) => {
     const chip = event.target.closest('[data-chip="album"]');
     if (!chip) return;
     const value = chip.dataset.value;
-    state.filters.albumId = state.filters.albumId === value ? null : value;
-    syncFilterChips();
-    render();
+    setFilter({ album: state.filters.album === value ? '' : value });
   });
 
-  // 标签 chips（多选，「与」关系）
+  // 标签 chips（多选，服务端为「与」关系）
   el.tagFilter.addEventListener('click', (event) => {
     const chip = event.target.closest('[data-chip="tag"]');
     if (!chip) return;
     const value = chip.dataset.value;
-    const set = new Set(state.filters.tags);
-    if (set.has(value)) set.delete(value);
-    else set.add(value);
-    state.filters.tags = [...set];
-    syncFilterChips();
-    render();
+    const next = new Set(state.filters.tags);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    setFilter({ tags: [...next] });
   });
 
-  // 点击相册卡片 → 直接筛选该相册
+  // 相册卡片 → 筛选该相册
   el.albums.addEventListener('click', (event) => {
     const card = event.target.closest('[data-album]');
     if (!card) return;
-    state.filters.albumId = card.dataset.album;
-    syncFilterChips();
-    render();
+    setFilter({ album: card.dataset.album });
     document.getElementById('gallery')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
@@ -211,8 +228,16 @@ function bindEvents() {
   el.gallery.addEventListener('click', (event) => {
     const id = resolveCardId(event);
     if (!id) return;
-    const at = state.visible.findIndex((photo) => photo.id === id);
-    if (at >= 0) lightbox.open(state.visible, at);
+    const at = state.items.findIndex((item) => item.id === id);
+    if (at >= 0) lightbox.open(state.items, at);
+  });
+
+  // 分页：加载下一页（页码由服务端 meta 驱动）
+  el.loadMore.addEventListener('click', () => {
+    if (!state.meta || !state.meta.hasMore) return;
+    state.page += 1;
+    el.loadMore.disabled = true;
+    refresh({ append: true });
   });
 
   // 主题切换（记忆到 localStorage）
@@ -242,34 +267,13 @@ async function bootstrap() {
   renderSkeleton(el.gallery, 6);
   bindEvents();
 
-  const { albums, items, errors } = await loadData();
-
-  if (errors.length) {
-    el.gallery.innerHTML = '';
-    el.empty.hidden = false;
-    el.empty.innerHTML = `<span class="empty-state__glyph">!</span>${errors
-      .map(escapeHtml)
-      .join('<br />')}<br />请通过本地服务器访问（<code>python serve.py</code>）。`;
+  try {
+    renderSite(await fetchSite());
+  } catch (error) {
+    showError(error.message);
     return;
   }
-
-  state.albums = albums;
-  // 把相册名称挂到条目上，卡片角标即可直接展示中文名
-  const albumNames = new Map(albums.map((album) => [album.id, album.name]));
-  state.items = items.map((item) => ({
-    ...item,
-    albumName: albumNames.get(item.albumId) || item.albumId,
-  }));
-  state.tags = collectTags(state.items);
-  state.typeCounts = countByType(state.items);
-
-  el.stats.photos.textContent = String(state.items.length);
-  el.stats.albums.textContent = String(albums.length);
-  el.stats.tags.textContent = String(state.tags.length);
-
-  renderAlbums(el.albums, albums, countByAlbum(state.items));
-  renderFilters();
-  render();
+  refresh();
 }
 
 bootstrap();

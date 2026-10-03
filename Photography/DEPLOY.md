@@ -146,6 +146,11 @@ location /       { root /opt/photography-linux-x64-XXXX; }
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
+> **注意**：作品集前台的搜索 / 筛选 / 排序与 EXIF 解析现在都由后端提供
+> （`/api/public/*`），上面的 `location /api/` 规则已经把它们一并代理过去。
+> 如果只把静态目录裸露出去（不经后端），前台会拿不到数据——
+> 要么保留 `/api/` 反代，要么直接用 `admin.py`（或 `serve.py`）托管整个站点。
+
 ---
 
 ## 6. 常驻运行（systemd）
