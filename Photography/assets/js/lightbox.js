@@ -93,7 +93,9 @@ export function createLightbox(root) {
 
     videoEl.setAttribute('poster', item.imageUrl || '');
     if (item.srcUrl) {
-      videoEl.src = item.srcUrl;
+      // 没有封面（后台没装 ffmpeg 时抓不了帧）就带 `#t=0.1` 让浏览器直接显示
+      // 开头一帧：否则播放器是一块纯黑，用户看不到任何预览。
+      videoEl.src = item.imageUrl ? item.srcUrl : `${item.srcUrl}#t=0.1`;
       return;
     }
 

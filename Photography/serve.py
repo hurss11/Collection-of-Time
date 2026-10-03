@@ -18,7 +18,6 @@ import functools
 import http.server
 import json
 import os
-import socketserver
 import sys
 import webbrowser
 from pathlib import Path
@@ -26,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import query, store                                  # noqa: E402
+from adminlib import query, ranges, store                           # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +67,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
+        if getattr(self, "_accept_ranges", False):
+            self.send_header("Accept-Ranges", "bytes")
         # 与 admin.py 保持一致：前端不用内联脚本 / 样式，因此无需 'unsafe-inline'
         self.send_header("Content-Security-Policy", "; ".join([
             "default-src 'self'",
@@ -111,9 +112,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return parts[0] in STATIC_ROOT_DIRS
 
     def send_head(self):                       # noqa: ANN201
-        if not self.static_allowed(Path(self.translate_path(self.path))):
+        target = Path(self.translate_path(self.path))
+        if not self.static_allowed(target):
             self.send_error(http.HTTPStatus.NOT_FOUND, "Not Found")
             return None
+
+        if target.is_file():
+            # 视频进度条 / 拖拽需要 206（详见 adminlib/ranges.py）
+            self._accept_ranges = True
+            size = target.stat().st_size
+            rng = ranges.parse_single_range(self.headers.get("Range") or "", size)
+            if rng is not None:
+                return ranges.send_partial(self, target, rng[0], rng[1])
+
         return super().send_head()
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: D102
@@ -125,7 +136,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path.startswith("/api/public/"):
             self.handle_public(path[len("/api/public/"):], parse_qs(parsed.query))
             return
-        super().do_GET()
+        self._accept_ranges = False
+        handle = self.send_head()
+        if not handle:
+            return
+        try:
+            if self.command != "HEAD":          # HEAD 只回头，不写体
+                self.copyfile(handle, self.wfile)
+        finally:
+            handle.close()
 
     def do_HEAD(self) -> None:                                  # noqa: N802
         self.do_GET()
@@ -210,12 +229,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "path": relative, "exif": rows, "raw": entry})
 
 
+class Server(http.server.ThreadingHTTPServer):
+    """线程化的预览服务。
+
+    媒体元素会为同一份视频并发发多个 Range 请求（而且要能中途取消），
+    单线程服务器上这些请求会互相排队，拖进度条就会卡；另外客户端掐断连接时
+    socketserver 默认会打一整段 traceback，这里静默处理。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address) -> None:     # noqa: ANN001
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> int:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
     handler = functools.partial(Handler, directory=ROOT)
 
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
+    with Server(("127.0.0.1", port), handler) as httpd:
         url = f"http://127.0.0.1:{port}/"
         print(f"Photography 已启动：{url}")
         print(f"  公开接口：{url}api/public/site")

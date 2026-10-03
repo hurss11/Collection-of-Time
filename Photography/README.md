@@ -426,6 +426,15 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
   nginx 用 `expires -1` 达到同样效果：命中 304 不传内容，改完立刻生效。
   那一版配置会把前台需要的 CSP / HSTS 等安全头一并写到 `location` 里——
   nginx 的 `add_header` **不与上层合并**，所以每个静态 location 都要重复声明。
+- **支持 HTTP Range（`206 Partial Content`）**：`<video>` 想要「能拖动的进度条 + 时长」
+  必须先能按字节取片段。只回 200 整份时，浏览器往往拿不到时长（moov 在末尾的 mp4、
+  webm、以及大文件），表现就是**播放器没有进度条、不能拖到中间**，而且每次都要重下整份。
+  实现在 `adminlib/ranges.py`（单段 `bytes=a-b` / `a-` / `-n`，多段与越界按整份 200 处理），
+  `admin.py` 与 `serve.py` 共用；同时修掉了「HEAD 也会回一份 body」的老问题
+  （媒体文件的 HEAD 以前会把整个视频写一遍）。交给 nginx 托管时它自带 Range 支持。
+- 拖动进度条会让浏览器频繁**中止**在途的媒体响应（`ConnectionReset` /
+  `Aborted` / `BrokenPipe`）。这些不是服务端错误，`admin.py` 与 `serve.py` 都静默处理，
+  否则一次播放就能往 journald 里灌几十段 traceback、把真错误埋掉。
 
 ### 反向代理层的额外防护
 
@@ -630,8 +639,8 @@ graph TD
 | `album` | string | 所属相册 id（与照片共用同一套相册） |
 | `provider` | string | `file`（本地文件）\| `youtube` \| `bilibili` \| `vimeo` \| `embed` |
 | `src` | string | `provider: "file"` 时为文件路径；否则填视频链接或视频 ID |
-| `poster` | string | 封面图路径（外链视频必填） |
-| `posterTime` | number | 运行时抓帧的时间点（秒），默认 `2` |
+| `poster` | string | 封面图路径（外链视频必填；本地视频留空时播放器会退而显示第一帧，网格卡片仍建议补上） |
+| `posterTime` | number | 运行时抓帧的时间点（秒），默认 `0` = 第一帧 |
 | `duration` | number \| string | 时长，可写 `48`、`"00:48"`、`"1:02:33"` |
 | `resolution` | string | 分辨率，如 `"3840 × 2160"` |
 | `date` / `location` / `description` / `tags` | — | 与照片同义，参与搜索与筛选 |

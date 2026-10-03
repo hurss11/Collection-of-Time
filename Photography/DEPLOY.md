@@ -226,6 +226,9 @@ python tools/check_https.py https://photos.example.com
       对照一下，超限请求不应出现在后端）
 - [ ] `/assets/js/app.js` 回 `Content-Encoding: gzip`（Python 3.12+ 下 `.js` 是
       `text/javascript`，`gzip_types` 漏了它就等于没压缩）
+- [ ] 视频能**拖动进度条**：`curl -r 0-99 -D- https://<域名>/assets/video/<你的视频>.mp4`
+      应回 `206` + `Content-Range` + `Accept-Ranges: bytes`
+      （只回 200 就说明这一层不支持 Range，播放器会没有进度条）
 - [ ] `README.md` 里 `assets/video/*.mp4` 两个占位样片存在（示例卡片不会点开就报错）
 
 自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。

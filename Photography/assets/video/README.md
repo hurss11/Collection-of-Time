@@ -4,9 +4,10 @@
 assets/video/
 ├── landscape-sunrise.mp4      # 占位样片（1280×720 / 4 秒 / H.264，见下方说明）
 ├── star-trails-timelapse.mp4  # 占位样片
-├── posters/                   # 封面图
-│   ├── v-001.svg
-│   └── landscape-sunrise.jpg
+├── posters/                   # 封面图（由后端写入：posters/<id>.<ext>）
+│   ├── v-001.jpg              #   占位样片的「第一帧」
+│   ├── v-002.jpg              #   占位样片的「第一帧」
+│   └── v-003.svg              #   外链视频的封面占位图（必须自己上传一张）
 ├── originals/                 # 原始素材，已在 .gitignore 中忽略
 └── raw/                       # 未压缩导出，已在 .gitignore 中忽略
 ```
@@ -45,6 +46,8 @@ ffmpeg -i original.mov -c:v libx264 -crf 20 -preset slow \
 4. **批量补封面**：`python tools/make_posters.py`。
 
 `poster` 留空的本地视频在前台只显示占位块，并会在后台「数据完整性」里被列出来。
+（前台会退而求其次：播放器带 `#t=0.1` 直接显示开头一帧，所以即便没装 ffmpeg
+也不会是一块纯黑；但网格里的卡片仍需要真正的封面图，建议补上。）
 
 > 外链嵌入的视频（YouTube / 哔哩哔哩等）**必须**提供 `poster`，
 > 因为浏览器不允许跨域读取 iframe 内的画面，后端也无法抓帧——

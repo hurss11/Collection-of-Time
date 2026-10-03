@@ -49,7 +49,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, multipart, query, schema, store    # noqa: E402
+from adminlib import auth, media, multipart, query, ranges, schema, store    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -234,6 +234,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Content-Security-Policy", self.content_security_policy())
+        if getattr(self, "_accept_ranges", False):
+            self.send_header("Accept-Ranges", "bytes")
 
         # 仅当前端被部署到其它源（--allow-origin）时才回跨域头；
         # 带 Cookie 的跨域必须回具体 Origin，不能用 *
@@ -320,6 +322,7 @@ class Handler(SimpleHTTPRequestHandler):
         self._cached_body = None
         self._body_read = 0
         self._upload_temps = []
+        self._accept_ranges = False
         super().handle_one_request()
 
     def content_length(self) -> int:
@@ -586,8 +589,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             # 其余走静态资源（方便在同源模式下直接预览站点）
+            # 注意：HEAD 只回头不回体，所以不能直接用 stdlib 的 do_GET
+            # （它会给 HEAD 也写一份内容，视频这种大文件白白传一整份）。
             if getattr(self.server, "serve_static", True):        # type: ignore[attr-defined]
-                super().do_GET()
+                handle = self.send_head()
+                if handle:
+                    try:
+                        if self.command != "HEAD":
+                            self.copyfile(handle, self.wfile)
+                    finally:
+                        handle.close()
             else:
                 self.send_error_json("静态资源已关闭（--no-static）", HTTPStatus.NOT_FOUND)
         except ApiError as exc:
@@ -601,8 +612,12 @@ class Handler(SimpleHTTPRequestHandler):
         except store.StoreError as exc:
             remember("保存失败", str(exc), ok=False)
             self.send_error_json(str(exc), HTTPStatus.CONFLICT)
-        except BrokenPipeError:
-            pass
+        except (ConnectionError, TimeoutError):
+            # 客户端中途走人：浏览器频繁中止媒体请求（拖动进度条、切换视频、
+            # 关闭页面）时的 ConnectionReset / Aborted / BrokenPipe，以及写超时。
+            # 这类不是服务端错误，静默断开即可——否则日志会被 traceback 淹没。
+            self.close_connection = True
+
         except Exception as exc:                                # noqa: BLE001
             traceback.print_exc()
             self.send_error_json(f"服务端异常：{exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -635,9 +650,20 @@ class Handler(SimpleHTTPRequestHandler):
         return parts[0] in STATIC_ROOT_DIRS
 
     def send_head(self):                       # noqa: ANN201
-        if not self.static_allowed(Path(self.translate_path(self.path))):
+        target = Path(self.translate_path(self.path))
+        if not self.static_allowed(target):
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return None
+
+        if target.is_file():
+            # 声明支持 Range，并处理 `Range: bytes=…` → 206
+            # （视频进度条 / 拖拽全靠它，见 adminlib/ranges.py 的说明）
+            self._accept_ranges = True
+            size = target.stat().st_size
+            rng = ranges.parse_single_range(self.headers.get("Range") or "", size)
+            if rng is not None:
+                return ranges.send_partial(self, target, rng[0], rng[1])
+
         return super().send_head()
 
     def not_modified(self, modified_at: float, extra: list[tuple[str, str]] | None = None) -> bool:
@@ -1653,6 +1679,25 @@ class Handler(SimpleHTTPRequestHandler):
 # 启动
 # ============================================================
 
+class Server(ThreadingHTTPServer):
+    """线程化的 HTTP 服务；只额外处理一件事：客户端中途走人时别刷 traceback。
+
+    浏览器拖动视频进度条、切换视频、关页面时会直接掐断连接，`wfile.flush()`
+    随即抛 ConnectionAborted / Reset / BrokenPipe。这类异常发生在 socketserver
+    的调度层（我们自己的处理函数已经吞掉了），默认实现会把整段 traceback 打到
+    stderr，几十次拖动就能把 journald 刷满、把真错误埋掉。
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:     # noqa: ANN001
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def local_ip() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -2121,7 +2166,7 @@ def main() -> int:
         print(f"  临时文件 : 清理了 {cleaned} 个上次未完成的上传残留（{UPLOAD_TMP_DIR}）")
 
     try:
-        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+        httpd = Server((args.host, args.port), Handler)
     except OSError as exc:
         print(f"无法监听 {args.host}:{args.port} → {exc}", file=sys.stderr)
         return 1
