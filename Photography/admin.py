@@ -92,6 +92,37 @@ ACCOUNTS = auth.AccountStore(CONFIG_PATH)
 SESSIONS = auth.SessionManager(ACCOUNTS, ttl_hours=12.0)
 LIMITER = auth.RateLimiter()
 
+
+def ensure_default_album(*, when_unused: bool = False) -> tuple[bool, list[str]]:
+    """保证「未分类」相册真实存在 —— 上传时没选相册的条目都引用它。
+
+    `schema.DEFAULT_ALBUM_ID` 是前端「未分类」选项的值，历史版本里它只是个字符串、
+    相册表里并没有这条记录，于是「数据完整性」会把所有没选相册的条目报成失效引用。
+    现在：
+      - when_unused=True（上传到「未分类」时）：缺了就补建；
+      - when_unused=False（启动时）：只在已有条目真的引用它时才补建，
+        免得给用不到它的站点凭空加一个空相册。
+    已存在时什么都不做。返回 (是否新建, 校验警告)。
+    """
+    albums = STORE.load("albums")
+    if any(query.text(album.get("id")) == schema.DEFAULT_ALBUM_ID for album in albums):
+        return False, []
+
+    if when_unused:
+        referenced = True
+    else:
+        referenced = any(
+            query.text(item.get("album")) == schema.DEFAULT_ALBUM_ID
+            for collection in ("photos", "videos")
+            for item in STORE.load(collection)
+        )
+    if not referenced:
+        return False, []
+
+    _album, warnings = STORE.upsert("albums", dict(schema.DEFAULT_ALBUM))
+    remember("数据修复", f"补建「{schema.DEFAULT_ALBUM['name']}」相册")
+    return True, list(warnings)
+
 # 简易操作记录，方便在后台「动态」里看到刚才做了什么
 HISTORY: list[dict[str, object]] = []
 
@@ -1125,8 +1156,14 @@ class Handler(SimpleHTTPRequestHandler):
             }
             for album in STORE.load("albums")
         ]
+        options = [option for option in albums if option["value"]]
+        # 「未分类」永远排第一（= 下拉的默认值）。相册记录还没建时先给个占位，
+        # 真正上传到它时会自动补建记录（见 ensure_default_album）。
+        default = next((o for o in options if o["value"] == schema.DEFAULT_ALBUM_ID), None)
+        options = [o for o in options if o["value"] != schema.DEFAULT_ALBUM_ID]
+        options.insert(0, default or {"value": schema.DEFAULT_ALBUM_ID, "label": schema.DEFAULT_ALBUM["name"]})
         return {
-            "albums": albums,
+            "albums": options,
             "accept": sorted(ALLOWED_UPLOAD_SUFFIXES),
             "maxFileBytes": MAX_UPLOAD_BYTES,
             "maxBatchBytes": MAX_BATCH_BYTES,
@@ -1311,17 +1348,22 @@ class Handler(SimpleHTTPRequestHandler):
         if not uploads:
             raise ApiError("没有收到文件（字段名应为 files）")
 
-        album = (fields.get("album") or "").strip() or "uncategorized"
+        album = (fields.get("album") or "").strip() or schema.DEFAULT_ALBUM_ID
         tags = [t.strip() for t in (fields.get("tags") or "").replace("，", ",").split(",") if t.strip()]
 
         # 上传时可选带一张封面图片（字段名 posterFile），用于本批次的视频
         cover = next((part for part in (files.get("posterFile") or []) if part.get("size")), None)
 
+        # 「未分类」相册在历史数据里可能并不存在，先补建，免得刚上传完就被完整性检查报失效引用
+        album_warnings: list[str] = []
+        if album == schema.DEFAULT_ALBUM_ID:
+            _created, album_warnings = ensure_default_album(when_unused=True)
+
         results = [self._handle_upload(upload, fields, album, tags, cover) for upload in uploads]
         ok_count = sum(1 for result in results if result["ok"])
         video_count = sum(1 for result in results if result.get("kind") == "video" and result["ok"])
 
-        warnings: list[str] = []
+        warnings: list[str] = list(album_warnings)
         if cover and not video_count:
             warnings.append("这次上传没有视频，附带的封面图片已忽略（照片请用「缩略图」）")
 
@@ -2191,6 +2233,13 @@ def main() -> int:
 
     display_host = "127.0.0.1" if not external else args.host
     url = f"http://{display_host}:{args.port}/admin/"
+
+    # 老数据里可能有条目引用「未分类」而相册并不存在 —— 启动时补齐，避免完整性面板一直报警
+    created, album_warnings = ensure_default_album()
+    if created:
+        print(f"  数据修复 : 已补建「{schema.DEFAULT_ALBUM['name']}」相册（有历史条目引用它）")
+    for warning in album_warnings:
+        print(f"  警告     : {warning}")
 
     account = ACCOUNTS.account()
     if account is None:

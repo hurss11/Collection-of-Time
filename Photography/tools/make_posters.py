@@ -33,6 +33,7 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 sys.path.insert(0, str(PROJECT_ROOT))
 from adminlib import videometa                     # noqa: E402
 from adminlib.media import find_binary             # noqa: E402
+from adminlib.schema import DEFAULT_ALBUM_ID       # noqa: E402
 
 
 def require(tool: str) -> str:
@@ -165,7 +166,7 @@ def main() -> int:
         snippets.append({
             "id": f"v-{video.stem}",
             "title": video.stem,
-            "album": "uncategorized",
+            "album": DEFAULT_ALBUM_ID,
             "provider": "file",
             "src": f"assets/video/{video.name}",
             "poster": f"assets/video/posters/{poster.name}",

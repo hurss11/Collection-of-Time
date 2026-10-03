@@ -246,18 +246,18 @@ export function renderBackups(backups) {
    上传
    ============================================================ */
 
-/** 上传选项：相册下拉与 accept 都来自服务端 schema.upload */
+/** 上传选项：相册下拉与 accept 都来自服务端 schema.upload
+    （「未分类」这一项由后端排在第一位，前端不再硬编码，避免相册补建后出现重复选项） */
 export function renderUploadOptions(upload) {
   const select = $('#up-album');
   if (select) {
     const previous = select.value;
     const albums = upload?.albums || [];
-    select.innerHTML = [
-      '<option value="uncategorized">未分类</option>',
-      ...albums.map((album) => `<option value="${escapeHtml(album.value)}">${escapeHtml(album.label)}</option>`),
-    ].join('');
-    if (previous) select.value = previous;
-    if (!select.value) select.value = 'uncategorized';
+    select.innerHTML = albums
+      .map((album) => `<option value="${escapeHtml(album.value)}">${escapeHtml(album.label)}</option>`)
+      .join('');
+    if (previous && albums.some((album) => album.value === previous)) select.value = previous;
+    if (!select.value && select.options.length) select.value = select.options[0].value;
   }
 
   const input = $('#file-input');

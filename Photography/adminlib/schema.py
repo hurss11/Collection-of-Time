@@ -80,6 +80,17 @@ FIELDS: dict[str, list[dict]] = {
 
 NOUNS = {"albums": "相册", "photos": "照片", "videos": "视频"}
 
+# 上传时没选相册的条目会挂到这个相册下。
+# 它不会凭空出现在数据里：上传到它时、或启动时发现历史条目引用了它，才会自动补建
+# （见 admin.ensure_default_album），这样没用到它的站点不会多出一个空相册。
+DEFAULT_ALBUM_ID = "uncategorized"
+DEFAULT_ALBUM: dict[str, str] = {
+    "id": DEFAULT_ALBUM_ID,
+    "name": "未分类",
+    "description": "上传时没有选择相册的条目会自动归到这里。",
+    "cover": "",
+}
+
 # 数字字段（前端可能发字符串过来）
 _NUMBER_KEYS = {"posterTime", "duration"}
 # 数组字段（逗号分隔的字符串也接受）
