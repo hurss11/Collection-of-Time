@@ -340,8 +340,13 @@ export function renderUploadResult(payload) {
       </div>`;
     }
 
-    const meta = [result.kind === 'video' ? '视频' : '图片', result.collection, result.exifSummary]
-      .filter(Boolean).join(' · ');
+    const meta = [
+      result.kind === 'video' ? '视频' : '图片',
+      result.collection,
+      result.durationText,
+      result.resolution,
+      result.exifSummary,
+    ].filter(Boolean).join(' · ');
 
     return `<div class="result-item">
       <div class="result-item__head">

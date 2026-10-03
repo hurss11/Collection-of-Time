@@ -1,11 +1,20 @@
 # -*- coding: utf-8 -*-
-"""纯标准库的 JPEG EXIF 解析。
+"""纯标准库的图片元数据解析：JPEG / TIFF / PNG / WebP 的 EXIF。
 
-与前端 assets/js/exif.js 保持一致的字段映射，用于上传照片时自动填充拍摄参数。
+- JPEG：APP1 段里的 TIFF 块（相机导出的主力格式）
+- TIFF：文件本身就是 TIFF，直接读标签
+- PNG：eXIf 数据块（Pillow / 新版导出工具会写）
+- WebP：RIFF 里的 EXIF 块
+
+EXIF 缺失时仍然会把**像素尺寸**读出来（JPEG 的 SOF、PNG 的 IHDR、
+WebP 的 VP8X/VP8/VP8L、TIFF 的 ImageWidth）—— 这样即使没有拍摄参数，
+「尺寸」字段也不会空着。
+
+与前端 assets/js/exif.js 保持一致的字段映射，用于上传时自动填充拍摄参数。
 
 用法：
     from adminlib.exifread import read_exif, to_entry_exif
-    raw = read_exif(path)            # {tag: value}，无 EXIF 时返回 {}
+    raw = read_exif(path)            # {tag: value}，认不出格式时抛 ExifError
     entry = to_entry_exif(raw)       # 可直接写进 photos.json 的 exif 字段
 """
 from __future__ import annotations
@@ -15,6 +24,8 @@ from pathlib import Path
 
 # TIFF 标签 → (英文字段名, 中文展示名)
 TAG_LABELS: dict[int, tuple[str, str]] = {
+    0x0100: ("ImageWidth", "宽度"),
+    0x0101: ("ImageLength", "高度"),
     0x010F: ("Make", "相机品牌"),
     0x0110: ("Model", "相机型号"),
     0x0112: ("Orientation", "方向"),
@@ -30,6 +41,10 @@ TAG_LABELS: dict[int, tuple[str, str]] = {
     0xA434: ("LensModel", "镜头"),
     0x9291: ("SubSecTimeOriginal", "亚秒"),
 }
+
+# 像素尺寸标签（EXIF 里常常缺，需要从容器头兜底）
+WIDTH_TAGS = (0xA002, 0x0100)
+HEIGHT_TAGS = (0xA003, 0x0101)
 
 TAG_EXIF_IFD = 0x8769
 
@@ -117,50 +132,46 @@ def _read_ifd(data: bytes, tiff: int, dir_start: int, endian: str) -> dict[int, 
 
 
 def parse_exif(buffer: bytes) -> dict[int, object]:
-    """从 JPEG 字节流解析 EXIF，返回 {tag: value}。
+    """解析图片字节流里的 EXIF，返回 {tag: value}。
+
+    支持 JPEG（APP1）/ TIFF / PNG（eXIf 块）/ WebP（EXIF 块）；
+    没有 EXIF 时只要能从容器头拿到像素尺寸也照样返回（只有尺寸字段）。
 
     任何畸形 / 截断的输入都会被归一化成 ExifError，不会抛出 struct.error 之类的底层异常。
     """
     try:
-        return _parse_exif(buffer)
+        return _parse_image(buffer)
     except ExifError:
         raise
     except (struct.error, IndexError, KeyError, ValueError) as exc:
         raise ExifError(f"EXIF 结构损坏：{type(exc).__name__}") from exc
 
 
-def _parse_exif(buffer: bytes) -> dict[int, object]:
-    if len(buffer) < 4 or buffer[0:2] != b"\xff\xd8":
-        raise ExifError("不是有效的 JPEG 文件（缺少 SOI 标记）")
+def _parse_image(buffer: bytes) -> dict[int, object]:
+    label, block, size = _locate(buffer)
+    if block is None and size is None:
+        raise ExifError(f"该文件不包含 EXIF 信息（{label}）")
 
-    # 1) 遍历标记段，定位 APP1 / Exif
-    offset = 2
-    tiff = -1
-    while offset + 4 <= len(buffer):
-        if buffer[offset] != 0xFF:
-            offset += 1
-            continue
+    tags: dict[int, object] = {}
+    if block:
+        tags = _parse_tiff_block(block)
 
-        marker = buffer[offset + 1]
-        if marker in (0xDA, 0xD9):  # SOS / EOI 之后不再有 EXIF
-            break
+    # EXIF 里经常没有像素尺寸（PixelXDimension 是可选的），用容器头兜底
+    if size:
+        width, height = size
+        if width and not any(tags.get(tag) for tag in WIDTH_TAGS):
+            tags[0xA002] = width
+        if height and not any(tags.get(tag) for tag in HEIGHT_TAGS):
+            tags[0xA003] = height
+    return tags
 
-        seg_size = struct.unpack_from(">H", buffer, offset + 2)[0]
-        seg_start = offset + 4
 
-        if marker == 0xE1 and buffer[seg_start:seg_start + 6] == b"Exif\x00\x00":
-            tiff = seg_start + 6
-            break
-
-        offset = seg_start + seg_size - 2
-
-    if tiff < 0:
-        raise ExifError("该图片不包含 EXIF 信息")
-    if tiff + 8 > len(buffer):
+def _parse_tiff_block(block: bytes) -> dict[int, object]:
+    """解析一个 TIFF 块（II/MM + 42）—— JPEG/PNG/WebP 的 EXIF 都是这段结构。"""
+    if len(block) < 8:
         raise ExifError("EXIF 数据被截断")
 
-    # 2) TIFF 头：字节序 + 魔数 42
-    endian_mark = buffer[tiff:tiff + 2]
+    endian_mark = block[0:2]
     if endian_mark == b"II":
         endian = "<"
     elif endian_mark == b"MM":
@@ -168,23 +179,136 @@ def _parse_exif(buffer: bytes) -> dict[int, object]:
     else:
         raise ExifError("未知的 TIFF 字节序")
 
-    (magic,) = struct.unpack_from(f"{endian}H", buffer, tiff + 2)
+    (magic,) = struct.unpack_from(f"{endian}H", block, 2)
     if magic != 42:
         raise ExifError("TIFF 头校验失败")
 
-    (ifd0_offset,) = struct.unpack_from(f"{endian}I", buffer, tiff + 4)
-    ifd0 = _read_ifd(buffer, tiff, tiff + ifd0_offset, endian)
+    (ifd0_offset,) = struct.unpack_from(f"{endian}I", block, 4)
+    ifd0 = _read_ifd(block, 0, ifd0_offset, endian)
 
     exif_ifd: dict[int, object] = {}
     pointer = ifd0.get(TAG_EXIF_IFD)
     if isinstance(pointer, int):
-        exif_ifd = _read_ifd(buffer, tiff, tiff + pointer, endian)
+        exif_ifd = _read_ifd(block, 0, pointer, endian)
 
     return {**ifd0, **exif_ifd}
 
 
+# ---------- 按格式定位 EXIF 与像素尺寸 ----------
+
+def _locate(buffer: bytes) -> tuple[str, bytes | None, tuple[int, int] | None]:
+    if buffer[:2] == b"\xff\xd8":
+        return "JPEG", _jpeg_exif_block(buffer), _jpeg_size(buffer)
+    if buffer[:4] in (b"II*\x00", b"MM\x00*"):
+        return "TIFF", buffer, None                    # 尺寸就在 TIFF 标签里
+    if buffer[:8] == b"\x89PNG\r\n\x1a\n":
+        return "PNG", _png_exif_block(buffer), _png_size(buffer)
+    if buffer[:4] == b"RIFF" and buffer[8:12] == b"WEBP":
+        return "WebP", _webp_exif_block(buffer), _webp_size(buffer)
+    return "未知格式", None, None
+
+
+def _jpeg_segments(buffer: bytes):
+    """遍历 JPEG 标记段，yield (marker, 数据起点, 数据长度)。"""
+    offset = 2
+    while offset + 4 <= len(buffer):
+        if buffer[offset] != 0xFF:
+            offset += 1
+            continue
+        marker = buffer[offset + 1]
+        if marker in (0xDA, 0xD9):                     # SOS / EOI 之后没有元数据段了
+            return
+        size = struct.unpack_from(">H", buffer, offset + 2)[0]
+        if size < 2:
+            return
+        yield marker, offset + 4, size - 2
+        offset += 2 + size
+
+
+def _jpeg_exif_block(buffer: bytes) -> bytes | None:
+    for marker, start, size in _jpeg_segments(buffer):
+        if marker == 0xE1 and buffer[start:start + 6] == b"Exif\x00\x00":
+            return buffer[start + 6:start + size]
+    return None
+
+
+def _jpeg_size(buffer: bytes) -> tuple[int, int] | None:
+    """从 SOFn 段读真实像素尺寸（不依赖 EXIF 里可选的尺寸标签）。"""
+    for marker, start, size in _jpeg_segments(buffer):
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and size >= 5:
+            height, width = struct.unpack_from(">HH", buffer, start + 1)
+            if width and height:
+                return width, height
+    return None
+
+
+def _png_chunks(buffer: bytes):
+    offset = 8
+    while offset + 8 <= len(buffer):
+        size = struct.unpack_from(">I", buffer, offset)[0]
+        kind = buffer[offset + 4:offset + 8]
+        body = offset + 8
+        if body + size > len(buffer):
+            return
+        yield kind, body, size
+        offset = body + size + 4
+
+
+def _png_exif_block(buffer: bytes) -> bytes | None:
+    for kind, body, size in _png_chunks(buffer):
+        if kind == b"eXIf":
+            return buffer[body:body + size]
+    return None
+
+
+def _png_size(buffer: bytes) -> tuple[int, int] | None:
+    for kind, body, size in _png_chunks(buffer):
+        if kind == b"IHDR" and size >= 8:
+            width, height = struct.unpack_from(">II", buffer, body)
+            return width, height
+        if kind in (b"IDAT", b"eXIf"):
+            break                                      # IHDR 必须是第一个块
+    return None
+
+
+def _webp_chunks(buffer: bytes):
+    offset = 12
+    while offset + 8 <= len(buffer):
+        kind = buffer[offset:offset + 4]
+        size = struct.unpack_from("<I", buffer, offset + 4)[0]
+        body = offset + 8
+        if body + size > len(buffer):
+            return
+        yield kind, body, size
+        offset = body + size + (size & 1)
+
+
+def _webp_exif_block(buffer: bytes) -> bytes | None:
+    for kind, body, size in _webp_chunks(buffer):
+        if kind.upper() == b"EXIF":
+            return buffer[body:body + size]
+    return None
+
+
+def _webp_size(buffer: bytes) -> tuple[int, int] | None:
+    for kind, body, size in _webp_chunks(buffer):
+        if kind == b"VP8X" and size >= 10:
+            version = buffer[body:body + 10]
+            width = int.from_bytes(version[4:7], "little") + 1
+            height = int.from_bytes(version[7:10], "little") + 1
+            return width, height
+        if kind == b"VP8 " and size >= 10:
+            width = struct.unpack_from("<H", buffer, body + 6)[0] & 0x3FFF
+            height = struct.unpack_from("<H", buffer, body + 8)[0] & 0x3FFF
+            return width, height
+        if kind == b"VP8L" and size >= 5:
+            bits = int.from_bytes(buffer[body + 1:body + 5], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    return None
+
+
 def read_exif(path: str | Path) -> dict[int, object]:
-    """从文件读取并解析 EXIF；文件不存在或非 JPEG 时抛出 ExifError。"""
+    """从文件读取并解析 EXIF；文件不存在或格式不认识时抛出 ExifError。"""
     file_path = Path(path)
     if not file_path.is_file():
         raise ExifError(f"文件不存在：{file_path}")
@@ -247,8 +371,8 @@ def to_entry_exif(raw: dict[int, object], *, fallback_date: str = "") -> dict[st
         else:
             camera = model_text
 
-    width = _first(raw.get(0xA002))
-    height = _first(raw.get(0xA003))
+    width = next((_first(raw.get(tag)) for tag in WIDTH_TAGS if _first(raw.get(tag))), None)
+    height = next((_first(raw.get(tag)) for tag in HEIGHT_TAGS if _first(raw.get(tag))), None)
     dimensions = f"{width} × {height}" if width and height else ""
 
     candidates = {

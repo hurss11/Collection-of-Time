@@ -4,6 +4,8 @@
 后台的所有媒体处理（视频封面、图片缩略图、时长与分辨率探测）都依赖 FFmpeg，
 但 FFmpeg 不是运行后台的必需条件：
    - 未安装时，上传仍可正常工作，只是跳过封面 / 缩略图生成并返回 warning。
+   - 视频的时长 / 分辨率 / 帧率 / 编码 / 设备这类元数据改用 adminlib.videometa
+     的纯 Python 容器解析兜底，所以「没有 ffprobe」也能自动识别。
    - 这样保证在最小化的服务器环境里后台不会因为缺依赖而不可用。
 
 FFmpeg 的查找顺序（前者优先）：
@@ -24,6 +26,8 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from adminlib.videometa import friendly_codec, parse_iso_clock
 
 TIMEOUT_PROBE = 20
 TIMEOUT_TRANSCODE = 300
@@ -175,11 +179,13 @@ def _run(cmd: list[str], timeout: int) -> tuple[bool, str]:
 
 
 def probe_media(ffprobe: str, path: str | Path) -> dict[str, object]:
-    """读取媒体信息：时长、分辨率、帧率、编码。
+    """读取媒体信息：时长、分辨率、帧率、编码、拍摄设备、创建时间。
 
     返回的字段缺失时为空，不抛异常（探测失败不应阻断上传流程）。
     """
-    info: dict[str, object] = {"duration": None, "resolution": "", "fps": "", "codec": ""}
+    info: dict[str, object] = {
+        "duration": None, "resolution": "", "fps": "", "codec": "", "device": "", "createdAt": "",
+    }
 
     ok, out = _run(
         [
@@ -224,9 +230,39 @@ def probe_media(ffprobe: str, path: str | Path) -> dict[str, object]:
 
         codec = stream.get("codec_name")
         if codec:
-            info["codec"] = str(codec).upper()
+            info["codec"] = friendly_codec(str(codec))
 
+        # 手机拍的视频会把设备写在流或容器的标签里
+        stream_tags = stream.get("tags") or {}
+        fill_device(info, stream_tags)
+        fill_created(info, stream_tags)
+
+    format_tags = payload.get("format", {}).get("tags") or {}
+    fill_device(info, format_tags)
+    fill_created(info, format_tags)
     return info
+
+
+def fill_device(info: dict[str, object], tags: dict) -> None:
+    """从容器标签里挑出「拍摄设备」。"""
+    if info.get("device"):
+        return
+    for key in ("com.apple.quicktime.model", "com.apple.quicktime.make", "model", "make", "encoder"):
+        value = str(tags.get(key) or "").strip()
+        if value and key != "encoder":
+            info["device"] = value
+            return
+
+
+def fill_created(info: dict[str, object], tags: dict) -> None:
+    """从容器标签里挑出创建时间（相机时钟）。"""
+    if info.get("createdAt"):
+        return
+    for key in ("creation_time", "com.apple.quicktime.creationdate", "date"):
+        clock = parse_iso_clock(str(tags.get(key) or ""))
+        if clock:
+            info["createdAt"] = clock
+            return
 
 
 def extract_frame(

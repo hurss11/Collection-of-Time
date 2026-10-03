@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """批量生成视频封面（poster）。
 
-依赖 ffmpeg / ffprobe（需在 PATH 中，Windows 可用 winget install Gyan.FFmpeg）。
+抓帧需要 ffmpeg；时长 / 分辨率等元数据优先用 ffprobe，
+没有 ffprobe 时自动退回纯标准库的容器解析（adminlib.videometa），所以
+「只装了 ffmpeg」也能跑出完整的 videos.json 片段。
 
 用法：
     python tools/make_posters.py                     # 扫描 assets/video/ 生成封面
@@ -28,10 +30,17 @@ POSTER_DIR = VIDEO_DIR / "posters"
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from adminlib import videometa                     # noqa: E402
+from adminlib.media import find_binary             # noqa: E402
+
 
 def require(tool: str) -> str:
-    """确认外部工具可用，否则给出安装指引。"""
-    path = shutil.which(tool)
+    """确认外部工具可用，否则给出安装指引。
+
+    查找顺序与后端一致：环境变量 COT_<TOOL> → 项目 bin/ → 系统 PATH。
+    """
+    path, _source = find_binary(tool, PROJECT_ROOT)
     if not path:
         sys.exit(
             f"未找到 {tool}。请先安装 FFmpeg 并确保它在 PATH 中：\n"
@@ -110,7 +119,9 @@ def main() -> int:
     args = parser.parse_args()
 
     ffmpeg = require("ffmpeg")
-    ffprobe = require("ffprobe")
+    ffprobe, _source = find_binary("ffprobe", PROJECT_ROOT)
+    if not ffprobe:
+        print("提示：未找到 ffprobe，时长 / 分辨率改用纯 Python 容器解析（结果同样可用）\n")
 
     if not VIDEO_DIR.is_dir():
         sys.exit(f"目录不存在：{VIDEO_DIR}")
@@ -128,8 +139,14 @@ def main() -> int:
 
     for video in videos:
         poster = POSTER_DIR / f"{video.stem}.jpg"
-        duration = probe_duration(ffprobe, video)
-        resolution = probe_resolution(ffprobe, video)
+        # ffprobe 优先，缺了就用纯 Python 的容器解析兜底
+        local = videometa.probe(video)
+        duration = probe_duration(ffprobe, video) if ffprobe else None
+        resolution = probe_resolution(ffprobe, video) if ffprobe else None
+        if duration is None:
+            duration = float(local.get("duration") or 0) or None
+        if not resolution:
+            resolution = str(local.get("resolution") or "") or None
 
         # 抓帧时间点不能超过时长
         at = args.time
@@ -155,6 +172,11 @@ def main() -> int:
             "posterTime": round(at, 1),
             "duration": round(duration) if duration else None,
             "resolution": resolution,
+            "exif": {key: value for key, value in {
+                "camera": local.get("device"),
+                "fps": local.get("fps"),
+                "codec": local.get("codec"),
+            }.items() if value},
         })
 
     print(f"\n完成：新增 / 更新 {ok} 个封面，输出目录 {display_path(POSTER_DIR)}")

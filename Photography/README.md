@@ -526,10 +526,13 @@ sudo ./run.sh systemd --install
 
 ### 上传时的自动化
 
-- **图片**：解析 JPEG 的 APP1 段，自动填充 `camera` / `lens` / `focalLength` / `aperture` / `shutter` / `iso` /
-  `dimensions`，并用 `dateTimeOriginal` 作为条目的 `date`；有 ffmpeg 时额外生成 800px 缩略图。
-- **视频**：用 ffprobe 读取时长 / 分辨率 / 帧率 / 编码，用 ffmpeg 在「2 秒」与「时长 10%」中取较早的时间点抓帧作封面。
-- **没装 ffmpeg 也能用**：跳过缩略图与封面，返回明确的警告提示，其余流程照常。上传超大图时还会提醒你图片会拖慢加载。
+- **图片**：解析 EXIF（JPEG 的 APP1、TIFF、PNG 的 `eXIf`、WebP 的 `EXIF`），自动填充
+  `camera` / `lens` / `focalLength` / `aperture` / `shutter` / `iso` / `dimensions`，
+  并用 `dateTimeOriginal` 作为条目的 `date`；尺寸缺失时从 SOF / IHDR / VP8X 兜底；有 ffmpeg 时额外生成 800px 缩略图。
+- **视频**：读时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间 —— 有 ffprobe 时用它，
+  没有就用 `adminlib/videometa.py` 直接解析容器（MP4/MOV、MKV/WebM、AVI 都支持），
+  并用容器里的 `creation_time` 填条目的 `date`；用 ffmpeg 在「2 秒」与「时长 10%」中取较早的时间点抓帧作封面。
+- **没装任何东西也能用**：元数据识别不依赖外部程序；缺 ffmpeg 时只是跳过缩略图与封面，返回明确的警告提示。
 - 启动时就会检测 FFmpeg（而不是上传时才检测），装错架构的二进制会被及时识别为不可用。
 
 ---
@@ -550,7 +553,8 @@ Photography/
 │   ├── multipart.py          # 流式 multipart 解析（上传体边收边落盘，内存不随大小涨）
 │   ├── query.py              # 搜索 / 筛选 / 排序 / 分页 + 展示投影（公开端与后台共用）
 │   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
-│   ├── exifread.py           # 标准库 JPEG EXIF 解析
+│   ├── exifread.py           # 标准库图片 EXIF 解析（JPEG / TIFF / PNG / WebP）
+│   ├── videometa.py          # 标准库视频容器解析（MP4/MOV、MKV/WebM、AVI 的时长/分辨率/帧率/编码/设备）
 │   └── media.py              # ffmpeg / ffprobe 封装与多位置探测（可选）
 ├── admin/                    # 后台前端（薄客户端：只渲染）
 │   ├── index.html            # 登录视图 + 后台视图
@@ -688,14 +692,44 @@ graph TD
 
 ---
 
+## 上传时自动识别元数据
+
+后台**零外部依赖**地读取上传文件的元数据，识别到的字段会直接填进条目（表单里留空才用识别值），
+上传结果里也会列出识别结果，例如：
+
+```
+图片 · photos · Canon EOS R5 · RF24-70mm F2.8 L IS USM · 35 mm · 1/250 s · f/5.6 · ISO 200
+视频 · videos · 00:03 · 320 × 240 · iPhone 15 Pro · 15 fps · H.264
+```
+
+| 类型 | 支持格式 | 自动识别 |
+| --- | --- | --- |
+| 图片 | JPEG、TIFF、PNG（`eXIf` 块）、WebP（`EXIF` 块） | 相机、镜头、焦距、光圈、快门、ISO、拍摄时间、像素尺寸 |
+| 视频 | MP4 / MOV / M4V / 3GP、Matroska / WebM、AVI | 时长、分辨率、帧率、编码、拍摄设备、创建时间 |
+
+实现要点（都在 `adminlib/` 里，纯标准库）：
+
+- **图片**：`exifread.py` 按文件头分发到各格式的解析；EXIF 里没有像素尺寸时
+  （`PixelXDimension` 是可选的）会从 JPEG 的 SOF、PNG 的 IHDR、WebP 的 VP8X/VP8/VP8L 兜底，
+  所以「尺寸」字段不会空着。
+- **视频**：`videometa.py` 直接读容器头（MP4 的 `moov/mvhd/tkhd/mdhd/stsd/stsz`、
+  Matroska 的 `Info/Tracks`、AVI 的 `avih/strh/strf`），并支持 Apple 的
+  `com.apple.quicktime.model`（手机拍的视频因此能自动填「设备」）、容器的 `creation_time`
+  （填「拍摄时间」）、tkhd 的显示矩阵（竖屏视频的分辨率按播放方向显示，不会写成横的）。
+  **不需要 ffprobe**：有 ffprobe 时优先用它（更权威），没有就用容器解析兜底。
+- 识别失败**不会阻断上传**：只会在该文件的结果里给一条 warning，字段留空等手填。
+- 文件是**流式读取**的（读容器头 + 按需读小段），几 GB 的视频也不会被读进内存。
+
+---
+
 ## 新增一张照片
 
 1. 把导出的图片放进 `assets/img/photos/`（缩略图放 `assets/img/photos/thumbs/`）。
 2. 在 `data/photos.json` 中追加一条记录，填写 `src` / `thumb` / `tags` / `exif`。
 3. 刷新页面即可，**无需任何构建步骤**。
 
-灯箱中的「解析原文件 EXIF」按钮会请求后端解析 JPEG 的 APP1 段
-（`GET /api/public/exif`，复用 `adminlib/exifread.py`），
+灯箱中的「解析原文件 EXIF」按钮会请求后端解析图片里的 EXIF
+（`GET /api/public/exif`，复用 `adminlib/exifread.py`，支持 JPEG / TIFF / PNG / WebP），
 因此即使 JSON 里没写 EXIF，也能从原图里解析出相机、快门、光圈、ISO 等参数。
 出于安全考虑，该接口**只允许解析 `assets/img/photos/` 下的文件**。
 
@@ -728,7 +762,9 @@ graph TD
 - **主题切换**：深色 / 浅色，写入 `localStorage` 记忆。
 - **快捷键**：`/` 聚焦搜索框。
 - **响应式与无障碍**：移动端自适应网格、`aria-pressed` 状态、`prefers-reduced-motion` 支持。
-- **内容后台**：零依赖的 Python 后台，登录认证 + 增删改查 + 上传 + EXIF 自动填充 + 自动备份与回滚。
+- **内容后台**：零依赖的 Python 后台，登录认证 + 增删改查 + 上传 + 元数据自动识别 + 自动备份与回滚。
+- **元数据识别**：上传图片自动读 EXIF（JPEG / TIFF / PNG / WebP），上传视频自动读
+  时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间（MP4 / MOV / MKV / WebM / AVI，**不需要 ffprobe**）。
 - **FFmpeg 集成**：三级查找（环境变量 / 项目 `bin/` / 系统 PATH），一条命令装静态构建并随项目打包。
 - **一键运行**：`run.sh` 把自检、装依赖、打包、建号、启动、看日志、装 systemd 收在一起。
 - **打包迁移**：`./run.sh package` 生成自包含的 tar.gz（含 FFmpeg），解压即可在服务器上运行。

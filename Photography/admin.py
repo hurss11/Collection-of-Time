@@ -49,7 +49,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, multipart, query, ranges, schema, store    # noqa: E402
+from adminlib import auth, media, multipart, query, ranges, schema, store, videometa    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -1377,6 +1377,9 @@ class Handler(SimpleHTTPRequestHandler):
             "thumb": saved.get("thumb", ""),
             "poster": saved.get("poster", ""),
             "exifSummary": query.exif_summary(saved, "video" if kind == "video" else "photo"),
+            "durationText": query.duration_text(query.parse_duration(saved.get("duration")))
+            if kind == "video" else "",
+            "resolution": str(saved.get("resolution") or ""),
             "warnings": list(warnings) + list(store_warnings),
         }
 
@@ -1396,12 +1399,15 @@ class Handler(SimpleHTTPRequestHandler):
             "tags": tags,
         }
 
-        # 自动读取 EXIF
+        # 自动读取 EXIF（JPEG / PNG / WebP / TIFF；没有拍摄参数时至少能拿到像素尺寸）
         if (fields.get("readExif", "1") not in ("0", "false")):
             try:
                 exif = to_entry_exif(read_exif(target))
                 if exif:
                     entry["exif"] = exif
+                    if not any(exif.get(key) for key in ("camera", "lens", "shutter", "aperture",
+                                                         "iso", "dateTimeOriginal")):
+                        warnings.append("图片里没有拍摄参数（相机 / 快门 / ISO 等），只识别出尺寸")
                 else:
                     warnings.append("未从图片中读到 EXIF 字段")
             except ExifError as exc:
@@ -1445,20 +1451,27 @@ class Handler(SimpleHTTPRequestHandler):
             "tags": tags,
         }
 
-        # 一次探测拿到时长 / 分辨率 / 帧率 / 编码
+        # 时长 / 分辨率 / 帧率 / 编码 / 设备：ffprobe 优先（更权威），
+        # 纯 Python 的容器解析兜底（服务器上常常只有 ffmpeg 甚至都没有）。
         info: dict[str, object] = {}
         if TOOLS.can_probe:
             info = media.probe_media(TOOLS.ffprobe, target)     # type: ignore[arg-type]
-            if info.get("duration"):
-                entry["duration"] = info["duration"]
-            if info.get("resolution"):
-                entry["resolution"] = info["resolution"]
-            if info.get("fps"):
-                exif["fps"] = str(info["fps"])
-            if info.get("codec"):
-                exif["codec"] = str(info["codec"])
-        else:
-            warnings.append("未安装 ffprobe，无法自动读取时长与分辨率，请手动补充")
+        local = videometa.probe(target)
+        merged = {key: info.get(key) or local.get(key) for key in videometa.FLAT_FIELDS}
+
+        if merged.get("duration"):
+            entry["duration"] = merged["duration"]
+        if merged.get("resolution"):
+            entry["resolution"] = merged["resolution"]
+        if merged.get("fps"):
+            exif["fps"] = str(merged["fps"])
+        if merged.get("codec"):
+            exif["codec"] = str(merged["codec"])
+        if merged.get("device"):
+            exif["camera"] = str(merged["device"])
+
+        if not merged.get("duration") and not merged.get("resolution"):
+            warnings.append("没能从视频里识别出时长 / 分辨率，请手动补充")
 
         # 封面：上传时带了图片就用它；否则抓帧，默认第 0 秒（第一帧）
         if cover and cover.get("size"):
@@ -1480,7 +1493,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if exif:
             entry["exif"] = exif
-        entry["date"] = (fields.get("date") or "").strip()
+        entry["date"] = (fields.get("date") or str(merged.get("createdAt") or "")).strip()
         entry["location"] = (fields.get("location") or "").strip()
         entry["description"] = (fields.get("description") or "").strip()
         return entry, warnings
