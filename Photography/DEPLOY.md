@@ -379,13 +379,36 @@ sudo ./run.sh systemd --install
 
 会写好 `/etc/systemd/system/photography-admin.service` 并立即启用（开机自启 + 崩溃自动重启）。
 
+生成的单元文件**带内存约束**（`MemoryHigh` / `MemoryMax` / `MemorySwapMax=0` / `PrivateTmp`）：
+小内存机器上最怕的不是服务崩，而是它把整机拖进 OOM——没有约束时内核会挑内存占用最大的
+进程杀，可能顺手杀掉同机的 nginx / 网关 / 数据库。加上 `MemoryMax` 之后，最坏情况只是
+这个服务自己重启一次（`Restart=on-failure`）。
+
+```bash
+# 默认 512M；机器宽裕或要经常导入大备份可以放宽
+MEMORY_MAX=1G sudo ./run.sh systemd --install
+python3 admin.py --print-systemd --memory-max 256M | sudo tee /etc/systemd/system/photography-admin.service
+```
+
 ```bash
 systemctl status photography-admin
 journalctl -u photography-admin -f
 sudo systemctl restart photography-admin
 ```
 
+> **从旧版本升级过来的必做一步**：老单元文件里没有内存约束。升级代码后重新生成一次单元文件
+> 并重载，否则这次的内存加固只在代码层生效、没有兜底：
+>
+> ```bash
+> git pull                      # 或解压新的发布包
+> MEMORY_MAX=512M sudo ./run.sh systemd --install
+> systemctl show photography-admin -p MemoryMax    # 应输出 MemoryMax=536870912
+> ```
+
 不想用 systemd 也可以 `./run.sh start`，它会 `nohup` 到后台，PID 存在 `.run/admin.pid`。
+
+> 用 `./run.sh start` + `nohup` 时没有 cgroup 约束，建议同时开一个 1~2GB 的 swap，
+> 或者在 `systemd-run` 里跑：`systemd-run --scope -p MemoryMax=512M ./run.sh start`。
 
 ---
 
@@ -458,5 +481,28 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | FFmpeg 报架构不对 | 见上面第 7 节，重新装对应平台的构建 |
 | 数据文件损坏 | 从 `data/.backups/` 里挑一份恢复，或后台「备份」页回滚 |
 | 站点资源 404 但后台能用 | 从**项目目录**里启动（`cd` 进项目再 `./run.sh start`） |
+| 服务被 OOM 杀掉 / 整机卡死 | 见下面「内存与 OOM」 |
+| 上传卡在 100% 不起作用 | 服务端在处理（读 EXIF / 生成缩略图与封面），大文件会花几秒；`journalctl -u photography-admin -f` 能看到耗时 |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。
+
+### 内存与 OOM
+
+`dmesg -T | grep -i "out of memory"` 或 `journalctl -k | grep -i oom` 能确认是不是内核 OOM。
+典型特征：`Out of memory: Killed process ... (python3)`，`task_memcg=/system.slice/photography-admin.service`，
+`anon-rss` 几百 MB 到几 GB。
+
+现版本（含流式上传）的占用与上传体积无关：正常情况下 RSS 只有 30～60MB，上传 300MB
+文件也不会涨。所以一旦又出现几百 MB 的 RSS，按顺序查：
+
+1. **单元文件是不是旧的**（老版本没有内存约束）：
+   `systemctl show photography-admin -p MemoryMax` → 空或 `infinity` 就是旧的，按第 6 节重新生成；
+2. **是不是旧代码**：`python3 admin.py --help | grep memory-max` 有输出说明是新版本
+   （`adminlib/multipart.py` 是否存在可以直接判断）；
+3. `journalctl -u photography-admin --since "-30min" | grep -E "POST|413|上游"` 看崩溃前后有没有
+   超大请求；nginx 侧的 `access.log` 里 `$request_length` 更直观：
+   `awk '{print $1, $4, $7, $10}' access.log | sort -k4 -n | tail`；
+4. 用 `./run.sh start`（`nohup` 方式）跑时没有 cgroup 兜底，建议加 swap，
+   或改用 `systemd-run --scope -p MemoryMax=512M ./run.sh start`。
+
+要临时观察：`while sleep 1; do grep VmRSS /proc/$(cat .run/admin.pid)/status; done`。

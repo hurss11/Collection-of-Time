@@ -530,21 +530,24 @@ reset_password() {
 systemd() {
   local port="${PORT:-8080}"
   local unit_name="photography-admin"
+  local memory="${MEMORY_MAX:-512M}"
 
   if [ "${1:-}" = "--install" ]; then
     [ "$(id -u)" -eq 0 ] || die "安装需要 root： sudo ./run.sh systemd --install"
     require_python
-    py admin.py --port "$port" --print-systemd >"/etc/systemd/system/$unit_name.service"
+    py admin.py --port "$port" --memory-max "$memory" --print-systemd \
+      >"/etc/systemd/system/$unit_name.service"
     systemctl daemon-reload
     systemctl enable --now "$unit_name"
     ok "已安装并启动：$unit_name"
+    info "  内存上限： MemoryMax=$memory（可用 MEMORY_MAX=1G ./run.sh systemd --install 调整）"
     info "  查看状态： systemctl status $unit_name"
     info "  查看日志： journalctl -u $unit_name -f"
     return 0
   fi
 
   require_python
-  py admin.py --port "$port" --print-systemd
+  py admin.py --port "$port" --memory-max "$memory" --print-systemd
   info ""
   info "安装为常驻服务："
   info "  sudo ./run.sh systemd --install"

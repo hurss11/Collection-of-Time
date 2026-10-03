@@ -353,7 +353,8 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 
 上传也是「后端调度、前端展示」：`POST /api/upload` 一次可带多个 `files`，
 返回 `results[]`（逐个文件的成功/失败与 `warnings`）与 `summary`，
-前端只需按 `upload.maxBatchBytes` 分批发送并渲染结果。
+前端只需按 `upload.maxBatchBytes` 分批发送并渲染结果。服务端**流式解析**请求体
+（见「内存模型」），单文件 / 单批上限在收的过程中就判，超限立刻中断。
 
 上传进度用 `XMLHttpRequest`（`fetch` 没有上传进度事件）实现：`admin/js/api.js` 的
 `uploadWithProgress()` 把 `xhr.upload.progress` 的 `{ loaded, total }` 交给上传面板，
@@ -368,7 +369,7 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 
 - 默认只监听 `127.0.0.1`，外部访问不到；
 - 除公开接口外，所有 API 都要求有效会话；
-- 上传有扩展名白名单、单文件 512MB 上限、单批 480MB 上限；
+- 上传有扩展名白名单、单文件 512MB 上限、单批 480MB 上限（**边收边判**，超限立刻中断）；
 - 删除文件前会做路径越界校验，只允许删 `assets/` 下的对应目录；
 - 静态资源与 `/admin` 资源都做了路径穿越防护；
 - 静态文件走白名单：只有站点根目录的 `index.html` / `favicon.svg` 与 `assets/`、`data/`
@@ -381,7 +382,36 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 - 登录失败按**真实客户端 IP** + 用户名限流：反向代理下用 `X-Forwarded-For` 的第一跳
   （只有当对端是本机 / 内网地址时才采信，公网直连伪造该头无效），因此反代后面
   每个访客各自计数，别人试错不会把管理员锁在门外；
+- **先鉴权再读请求体**：未登录的 `POST/PUT/DELETE` 直接回 401 并断开连接，不碰 body——
+  否则任何人都能用一个大 body 把内存顶满（读 body 不需要凭据）；
 - `--no-auth` 只在监听本机时才允许使用（本地调试用）。
+
+### 内存模型（小内存机器必读）
+
+服务的内存占用**与上传文件大小无关**，这是刻意的设计：
+
+| 请求 | 峰值 RSS（1.6GB 小机器实测） |
+| --- | --- |
+| `GET /api/items/*`（全部条目） | +0.2MB |
+| 上传 50MB / 150MB / 300MB | +1.4MB（不随大小变化） |
+| 未登录的 300MB `POST` | +1.4MB（立即 401，body 不读） |
+| 两个 300MB 上传并发 | +1～2MB |
+| 导入 10MB JSON 备份 | +50MB（`json.loads` 本身要放大 3~6 倍，故上限 32MB） |
+
+做法：
+
+- 上传体**流式解析**（`adminlib/multipart.py`）：文件 part 边收边写进
+  `data/.tmp/`，收完直接 `rename` 到 `assets/` 下的最终位置；内存里只留一个
+  `256KB` 的读块与表单字段。标准库的 `email` 解析器要求整个请求体先进内存
+  （实测放大 **12 倍**：300MB 上传 → 3.6GB RSS，两个并发 → 7.3GB，1.6GB 的机器必 OOM），
+  所以这里手写了边界扫描；part 头部仍交给 `email` 解析，保证中文文件名等细节一致。
+- 上传中的临时文件在 `data/.tmp/`（`.` 开头，静态白名单不会外泄）；请求结束统一清理，
+  进程被杀留下的残留文件在下次启动时清掉。
+- JSON 请求体（导入备份 / 覆盖保存）上限 `MAX_JSON_BYTES = 32MB`，超过直接 413。
+- systemd 单元带 `MemoryHigh` / `MemoryMax`（默认 512M，可用
+  `--memory-max` 或 `MEMORY_MAX=1G ./run.sh systemd --install` 调整）与 `MemorySwapMax=0`：
+  万一真撞上上限，**只影响这个服务**，不会像没有约束时那样被内核 OOM 连累整机。
+- 单个 socket 读写的空闲超时 `REQUEST_TIMEOUT = 120` 秒：慢速客户端不会长时间占着线程。
 
 ### 静态资源与缓存
 
@@ -504,6 +534,7 @@ Photography/
 ├── adminlib/                 # 后端模块
 │   ├── auth.py               # 密码哈希、签名会话、CSRF、登录限流
 │   ├── store.py              # JSON 读写、校验、原子写入、自动备份
+│   ├── multipart.py          # 流式 multipart 解析（上传体边收边落盘，内存不随大小涨）
 │   ├── query.py              # 搜索 / 筛选 / 排序 / 分页 + 展示投影（公开端与后台共用）
 │   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
 │   ├── exifread.py           # 标准库 JPEG EXIF 解析
@@ -527,7 +558,8 @@ Photography/
 │   ├── albums.json           # 相册数据
 │   ├── photos.json           # 照片数据（含 EXIF）
 │   ├── videos.json           # 视频数据（本地文件或外链嵌入）
-│   └── .backups/             # 保存前自动生成的备份（已 gitignore）
+│   ├── .backups/             # 保存前自动生成的备份（已 gitignore）
+│   └── .tmp/                 # 上传中的临时文件（已 gitignore，启动时清理残留）
 ├── assets/
 │   ├── css/{main.css, lightbox.css}
 │   ├── js/                   # 作品集前端：取数、渲染、灯箱（薄客户端）

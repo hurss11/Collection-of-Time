@@ -35,13 +35,13 @@ import ipaddress
 import json
 import mimetypes
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
 import traceback
-from email import policy, utils as email_utils
-from email.parser import BytesParser
+from email import utils as email_utils
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,7 +49,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, query, schema, store    # noqa: E402
+from adminlib import auth, media, multipart, query, schema, store    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -59,11 +59,15 @@ THUMB_DIR = IMAGE_DIR / "thumbs"
 VIDEO_DIR = ROOT / "assets" / "video"
 POSTER_DIR = VIDEO_DIR / "posters"
 CONFIG_PATH = ROOT / auth.CONFIG_NAME
+UPLOAD_TMP_DIR = ROOT / "data" / ".tmp"       # 上传中的临时文件（静态白名单排除 . 开头的目录）
 
 ALLOWED_UPLOAD_SUFFIXES = media.IMAGE_SUFFIXES | media.VIDEO_SUFFIXES
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024          # 单文件 512MB
 MAX_BATCH_BYTES = 480 * 1024 * 1024           # 一次批量上传的总体积上限（小于 MAX_BODY_BYTES 留余量）
 MAX_BODY_BYTES = MAX_UPLOAD_BYTES + 8 * 1024 * 1024
+MAX_JSON_BYTES = 32 * 1024 * 1024             # JSON 请求体（导入备份 / 覆盖保存）上限：
+                                              # json.loads 会放大 3~6 倍，别让它在小机器上撞上限
+REQUEST_TIMEOUT = 120                         # 单次 socket 读写的空闲上限（秒），防慢速连接占死线程
 HISTORY_KEEP = 60                             # 内存中保留的最近操作记录
 
 # 无需登录即可访问的接口（精确匹配）与公开接口前缀
@@ -169,6 +173,7 @@ class Handler(SimpleHTTPRequestHandler):
     server_version = "CollectionOfTime"     # 不暴露具体版本号
     sys_version = ""                        # 也不暴露 Python 版本
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_TIMEOUT               # 慢速连接：空闲超过这个时间就断开，别占着线程
 
     def version_string(self) -> str:
         """响应头里的 Server 值：整站统一成产品名，减少指纹。"""
@@ -306,49 +311,78 @@ class Handler(SimpleHTTPRequestHandler):
     # ---------- 请求体 ----------
 
     def handle_one_request(self) -> None:
-        """每个请求开始时清空请求体缓存。
+        """每个请求开始时清空请求体缓存与临时文件清单。
 
         关键：http.server 会用**同一个 Handler 实例**处理同一条 keep-alive 连接上的
         所有请求，所以请求级缓存必须在每个请求开头重置——否则第二个请求会读到
         上一个请求的 body（既是数据错乱，也是安全隐患）。
         """
         self._cached_body = None
+        self._body_read = 0
+        self._upload_temps = []
         super().handle_one_request()
 
-    def read_body(self) -> bytes:
-        """读取并缓存请求体（缓存生命周期＝单个请求，见 handle_one_request）。
-
-        必须保证「无论业务是否需要请求体，都把 Content-Length 指定的字节读完」：
-        否则在 HTTP/1.1 keep-alive 连接上，残留字节会被当成下一个请求的开头，
-        出现类似 `Unsupported method ('{}GET')` 的诡异错误。
-        """
-        if self._cached_body is not None:
-            return self._cached_body
-
+    def content_length(self) -> int:
+        """Content-Length（缺省 0）。不合法就直接断开连接。"""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self.close_connection = True
             raise ApiError("Content-Length 不合法") from None
+        return max(0, length)
 
-        if length <= 0:
-            self._cached_body = b""
+    def read_body(self, limit: int | None = None) -> bytes:
+        """把请求体读进内存并缓存（上限默认 MAX_BODY_BYTES）。
+
+        只有 JSON / 表单这类小请求体才该走这里；**上传走流式解析**（见 read_multipart），
+        因为把几百 MB 的请求体整块读进内存，在 1.6GB 的小机器上会直接把整机拖进 OOM。
+
+        返回前保证「Content-Length 指定的字节都已被消费」，否则 keep-alive 上残留的
+        字节会被当成下一个请求的开头，出现类似 `Unsupported method ('{}GET')` 的怪错。
+        """
+        if self._cached_body is not None:
             return self._cached_body
 
-        if length > MAX_BODY_BYTES:
+        limit = MAX_BODY_BYTES if limit is None else limit
+        length = self.content_length()
+
+        if length > limit:
             # 不读就无法保持连接同步，直接断开
             self.close_connection = True
             raise ApiError(
-                f"请求体过大（{length / 1048576:.1f}MB，上限 {MAX_BODY_BYTES // 1048576}MB）",
+                f"请求体过大（{length / 1048576:.1f}MB，上限 {limit // 1048576}MB）",
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
-        data = self.rfile.read(length)
-        self._cached_body = data or b""
-        return self._cached_body
+        data = b"" if length <= 0 else (self.rfile.read(length) or b"")
+        self._body_read = len(data)
+        self._cached_body = data
+        return data
+
+    def drain_body(self) -> None:
+        """请求处理完后，把没读完的请求体收尾：小则读掉，大则断开连接。
+
+        没有这一步，下一个请求会从残留字节开始解析（keep-alive 错位）。
+        """
+        leftover = self.content_length() - self._body_read
+        if leftover <= 0:
+            return
+        if leftover <= 64 * 1024:
+            try:
+                remaining = leftover
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                self._body_read = self.content_length()
+            except OSError:
+                self.close_connection = True
+        else:
+            self.close_connection = True
 
     def read_json(self) -> object:
-        body = self.read_body()
+        body = self.read_body(MAX_JSON_BYTES)
         if not body:
             return {}
         try:
@@ -356,49 +390,77 @@ class Handler(SimpleHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ApiError(f"JSON 解析失败：{exc}") from exc
 
-    def read_multipart(self) -> tuple[dict[str, str], dict[str, list[dict]]]:
-        """解析 multipart/form-data。
+    # ---------- 上传临时文件 ----------
 
-        标准库的 cgi 模块在 Python 3.13 已被移除，这里用 email 解析器实现。
-        同名文件字段会出现多次（批量上传），因此文件一律收集成列表。
+    def cleanup_temps(self) -> None:
+        """删掉这次请求留下的临时文件（已经 move 走的不存在了，删不掉也无所谓）。"""
+        for path in getattr(self, "_upload_temps", []):
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+        self._upload_temps = []
+
+    @staticmethod
+    def adopt_temp(source: Path, target: Path) -> None:
+        """把上传的临时文件搬到最终位置：同一文件系统用 rename（原子、零拷贝）。"""
+        try:
+            os.replace(source, target)
+            return
+        except OSError:
+            pass
+        with open(source, "rb") as src, open(target, "wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+        try:
+            source.unlink()
+        except OSError:
+            pass
+
+    def read_multipart(self) -> tuple[dict[str, str], dict[str, list[dict]]]:
+        """流式解析 multipart/form-data（文件落到 data/.tmp/，内存不随大小增长）。
+
+        标准库的 cgi 模块在 Python 3.13 已被移除，email 解析器又要求整个请求体
+        先读进内存，因此这里用 adminlib.multipart 的流式实现。同名文件字段会出现
+        多次（批量上传），文件一律收集成列表，每项带临时文件 path 与 size。
         """
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
             raise ApiError("该接口需要 multipart/form-data 请求")
 
-        body = self.read_body()
-        if not body:
+        length = self.content_length()
+        if length <= 0:
             raise ApiError("请求体为空")
+        if length > MAX_BODY_BYTES:
+            self.close_connection = True
+            raise ApiError(
+                f"请求体过大（{length / 1048576:.1f}MB，上限 {MAX_BODY_BYTES // 1048576}MB）",
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
 
-        raw = (
-            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
-            + body
-        )
-        message = BytesParser(policy=policy.default).parsebytes(raw)
+        try:
+            boundary = multipart.boundary_from_content_type(content_type)
+        except multipart.MultipartError as exc:
+            raise ApiError(str(exc)) from exc
 
-        if not message.is_multipart():
-            raise ApiError("无法解析 multipart 内容")
+        reader = multipart.LimitedReader(self.rfile, length)
+        try:
+            fields, files = multipart.parse(
+                reader, boundary,
+                temp_dir=UPLOAD_TMP_DIR,
+                max_file_bytes=MAX_UPLOAD_BYTES,
+                max_total_bytes=MAX_BATCH_BYTES,
+            )
+        except multipart.MultipartError as exc:
+            self._body_read = reader.consumed
+            self.close_connection = True           # 没读完，连接不能复用
+            raise ApiError(str(exc)) from exc
 
-        fields: dict[str, str] = {}
-        files: dict[str, list[dict]] = {}
-
-        for part in message.iter_parts():
-            name = part.get_param("name", header="content-disposition")
-            if not name:
-                continue
-
-            filename = part.get_filename()
-            payload = part.get_payload(decode=True) or b""
-
-            if filename:
-                files.setdefault(name, []).append({
-                    "filename": filename,
-                    "data": payload,
-                    "content_type": part.get_content_type(),
-                })
-            else:
-                fields[name] = payload.decode("utf-8", "replace")
-
+        self._body_read = reader.consumed
+        self._upload_temps = [part["path"] for group in files.values() for part in group]
         return fields, files
 
     # ---------- 认证 / 会话 ----------
@@ -498,18 +560,16 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         params = parse_qs(parsed.query)
-
-        # 带 body 的请求一律先读完，保证 keep-alive 连接上的后续请求不会错位
-        if method in ("POST", "PUT", "DELETE", "PATCH"):
-            try:
-                self.read_body()
-            except ApiError as exc:
-                self.send_error_json(exc.message, exc.status)
-                return
+        has_body = method in ("POST", "PUT", "DELETE", "PATCH")
 
         try:
             if path.startswith("/api/"):
+                # 先鉴权再碰请求体：否则任何人都能用一个大 body 把内存顶满
+                # （读 body 前不需要凭据 = 免费的 OOM DoS）。拒绝时请求体没读，
+                # 连接不能复用，直接让客户端重连。
                 if not self.require_auth(path, method):
+                    if has_body:
+                        self.close_connection = True
                     return
                 self.handle_api(method, path, params)
                 return
@@ -546,6 +606,10 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:                                # noqa: BLE001
             traceback.print_exc()
             self.send_error_json(f"服务端异常：{exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self.cleanup_temps()
+            if has_body:
+                self.drain_body()
 
     # ---------- 静态 ----------
 
@@ -1225,7 +1289,7 @@ class Handler(SimpleHTTPRequestHandler):
         tags = [t.strip() for t in (fields.get("tags") or "").replace("，", ",").split(",") if t.strip()]
 
         # 上传时可选带一张封面图片（字段名 posterFile），用于本批次的视频
-        cover = next((part for part in (files.get("posterFile") or []) if part.get("data")), None)
+        cover = next((part for part in (files.get("posterFile") or []) if part.get("size")), None)
 
         results = [self._handle_upload(upload, fields, album, tags, cover) for upload in uploads]
         ok_count = sum(1 for result in results if result["ok"])
@@ -1249,10 +1313,8 @@ class Handler(SimpleHTTPRequestHandler):
         """处理单个文件；失败只影响这一条，整体仍返回 200 供前端逐条显示。"""
         name = store.safe_filename(upload.get("filename") or "", fallback="upload")
         try:
-            if not upload.get("data"):
+            if not upload.get("size"):
                 raise ApiError("文件内容为空")
-            if len(upload["data"]) > MAX_UPLOAD_BYTES:
-                raise ApiError(f"单个文件超过上限 {MAX_UPLOAD_BYTES // 1048576}MB")
 
             suffix = Path(name).suffix.lower()
             if suffix not in ALLOWED_UPLOAD_SUFFIXES:
@@ -1295,7 +1357,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _save_image(self, upload: dict, original: str, album: str, title: str,
                     tags: list[str], fields: dict[str, str]) -> tuple[dict, list[str]]:
         target = store.unique_path(IMAGE_DIR, original)
-        target.write_bytes(upload["data"])
+        self.adopt_temp(Path(upload["path"]), target)
         relative = store.ensure_relative(ROOT, target)
 
         warnings: list[str] = []
@@ -1340,7 +1402,7 @@ class Handler(SimpleHTTPRequestHandler):
                     tags: list[str], fields: dict[str, str],
                     cover: dict | None = None) -> tuple[dict, list[str]]:
         target = store.unique_path(VIDEO_DIR, original)
-        target.write_bytes(upload["data"])
+        self.adopt_temp(Path(upload["path"]), target)
         relative = store.ensure_relative(ROOT, target)
 
         warnings: list[str] = []
@@ -1373,7 +1435,7 @@ class Handler(SimpleHTTPRequestHandler):
             warnings.append("未安装 ffprobe，无法自动读取时长与分辨率，请手动补充")
 
         # 封面：上传时带了图片就用它；否则抓帧，默认第 0 秒（第一帧）
-        if cover and cover.get("data"):
+        if cover and cover.get("size"):
             poster, problems = self._store_cover(item_id, cover)
             warnings.extend(problems)
             if poster:
@@ -1440,7 +1502,8 @@ class Handler(SimpleHTTPRequestHandler):
             return "", ["封面必须是图片（jpg / png / webp / avif / tiff）"]
         target = self._cover_target(item_id, suffix)
         try:
-            target.write_bytes(cover["data"])
+            # 封面可能被同批次的多个视频共用，所以是复制而不是搬走临时文件
+            shutil.copyfile(cover["path"], target)
         except OSError as exc:
             return "", [f"封面保存失败：{exc}"]
         self._drop_stale_covers(item_id, target)
@@ -1470,7 +1533,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise ApiError(f"视频不存在：{item_id}", HTTPStatus.NOT_FOUND)
 
         fields, files = self.read_multipart()
-        cover = next((part for part in (files.get("file") or []) if part.get("data")), None)
+        cover = next((part for part in (files.get("file") or []) if part.get("size")), None)
         warnings: list[str] = []
 
         if cover:
@@ -1547,7 +1610,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not upload:
                 raise ApiError("没有收到文件（字段名应为 file）")
             try:
-                payload = json.loads(upload["data"].decode("utf-8-sig"))
+                with open(upload["path"], "r", encoding="utf-8-sig") as handle:
+                    payload = json.load(handle)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ApiError(f"导入文件不是合法 JSON：{exc}") from exc
             replace = (fields.get("mode") or "replace") != "merge"
@@ -1598,7 +1662,26 @@ def local_ip() -> str:
         return "127.0.0.1"
 
 
-def systemd_unit(port: int, session_hours: float) -> str:
+def sweep_upload_temps() -> int:
+    """启动时清掉上次没收尾的上传临时文件（进程被杀时留下的）。
+
+    返回清理的文件数。
+    """
+    if not UPLOAD_TMP_DIR.is_dir():
+        return 0
+    removed = 0
+    for path in UPLOAD_TMP_DIR.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def systemd_unit(port: int, session_hours: float, memory_max: str = "512M") -> str:
     python = sys.executable
     return f"""[Unit]
 Description=Collection of Time - Photography Admin
@@ -1611,6 +1694,15 @@ ExecStart={python} {ROOT / 'admin.py'} --host 127.0.0.1 --port {port} --session-
 Restart=on-failure
 RestartSec=3
 User={os.environ.get('USER') or 'www-data'}
+
+# 内存与临时目录约束：没有这几行，Python 进程涨到多少就吃多少，
+# 小内存机器上会被内核 OOM 杀掉（甚至顺手杀掉同机的其它服务）。
+# 上传走流式落盘，正常情况下 RSS 只有几十 MB；到上限时只影响本服务：
+# 超过 MemoryHigh 先被限流并回收，超过 MemoryMax 只杀这个 cgroup。
+MemoryHigh={memory_max}
+MemoryMax={memory_max}
+MemorySwapMax=0
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -1916,6 +2008,8 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--print-systemd", action="store_true",
                         help="打印 systemd 单元文件后退出")
+    parser.add_argument("--memory-max", default="512M", metavar="SIZE",
+                        help="systemd 单元里的内存上限，默认 512M（--print-systemd 用）")
     parser.add_argument("--print-nginx", action="store_true",
                         help="打印 nginx HTTPS 反向代理配置后退出（配合 --domain 使用）")
     parser.add_argument("--domain", default="", metavar="HOST",
@@ -1948,7 +2042,7 @@ def main() -> int:
         return command_fetch_ffmpeg([])
 
     if args.print_systemd:
-        print(systemd_unit(args.port, args.session_hours))
+        print(systemd_unit(args.port, args.session_hours, args.memory_max))
         return 0
 
     if args.print_nginx:
@@ -1983,6 +2077,10 @@ def main() -> int:
 
     ThreadingHTTPServer.allow_reuse_address = True
     ThreadingHTTPServer.daemon_threads = True
+
+    cleaned = sweep_upload_temps()
+    if cleaned:
+        print(f"  临时文件 : 清理了 {cleaned} 个上次未完成的上传残留（{UPLOAD_TMP_DIR}）")
 
     try:
         httpd = ThreadingHTTPServer((args.host, args.port), Handler)
