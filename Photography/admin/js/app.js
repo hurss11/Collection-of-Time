@@ -491,6 +491,16 @@ function bindEvents() {
   $('#modal').addEventListener('click', (event) => {
     if (event.target.closest('[data-close]')) modal.close();
   });
+
+  // 缩略图加载失败 → 降级成角标（error 事件不冒泡，必须在捕获阶段监听）
+  document.addEventListener('error', (event) => {
+    const node = event.target;
+    if (!(node instanceof HTMLImageElement) || !node.dataset.fallback) return;
+    const badge = document.createElement('span');
+    badge.className = 'badge badge--missing';
+    badge.textContent = node.dataset.fallback;
+    node.replaceWith(badge);
+  }, true);
   $('#modal-save').addEventListener('click', () => modal.triggerSave());
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && modal.isOpen) modal.close();

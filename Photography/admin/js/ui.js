@@ -111,9 +111,8 @@ export const modal = {
    ============================================================ */
 
 function fieldMarkup(field, value, albums) {
-  const common = `data-key="${escapeHtml(field.key)}" class="input"`;
+  const common = `data-key="${escapeHtml(field.key)}" class="input${field.mono ? ' input--mono' : ''}"`;
   const hint = field.hint ? `<span class="muted">${escapeHtml(field.hint)}</span>` : '';
-  const mono = field.mono ? ' style="font-family:var(--font-mono);font-size:12.5px"' : '';
   const label = `<span>${escapeHtml(field.label)}${field.required ? ' <i class="req">*</i>' : ''}</span>`;
 
   if (field.type === 'select') {
@@ -142,7 +141,7 @@ function fieldMarkup(field, value, albums) {
   const type = field.type === 'number' ? 'number' : field.type === 'password' ? 'password' : 'text';
   const step = field.type === 'number' ? ' step="any"' : '';
   const autocomplete = field.type === 'password' ? ' autocomplete="new-password"' : '';
-  return `<label class="field">${label}<input ${common} type="${type}"${step}${autocomplete}${mono}
+  return `<label class="field">${label}<input ${common} type="${type}"${step}${autocomplete}
     value="${escapeHtml(value ?? '')}" placeholder="${escapeHtml(field.placeholder || '')}" />${hint}</label>`;
 }
 

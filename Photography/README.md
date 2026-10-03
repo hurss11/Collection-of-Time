@@ -285,6 +285,10 @@ ADMIN_PASSWORD='新密码' ./run.sh reset-password        # 非交互
 python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 ```
 
+> CSP 的 `connect-src` 只允许同源。用 `--allow-origin` 指定的源会被自动加进 `connect-src`，
+> 因此跨源调用 API 只需按上面的方式声明一次；若前端改用别的域（例如静态站放在 CDN），
+> 需要把该域也写进 `--allow-origin`，否则浏览器会以 CSP 违规拦掉 fetch。
+
 主要接口（完整字段说明见「前后端契约」一节）：
 
 **公开只读接口（无需登录，作品集前端使用）**
@@ -362,7 +366,11 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 - 静态资源与 `/admin` 资源都做了路径穿越防护；
 - 静态文件走白名单：只有站点根目录的 `index.html` / `favicon.svg` 与 `assets/`、`data/`
   下的文件会对外提供，后端源码、`adminlib/`、`admin.config.json`（含会话密钥）与
-  `data/.backups/` 一律返回 404；
+  `data/.backups/` 一律返回 404（`admin.py` 与 `serve.py` 用同一份白名单）；
+- 禁止目录列表：请求 `/assets/`、`/data/` 这类目录会返回 403，只能取到具体文件；
+- 响应头统一带 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy` 与
+  **CSP**（`default-src 'self'`，脚本、样式都只允许外部文件，不用 `unsafe-inline`）；
+- `Server` 头只回 `CollectionOfTime`，不暴露 Python 版本与框架信息；
 - `--no-auth` 只在监听本机时才允许使用（本地调试用）。
 
 ### 服务器部署
@@ -624,7 +632,6 @@ graph TD
 
 - 后台增加批量编辑（多选改相册 / 加标签）与拖拽排序。
 - 登录增加 TOTP 双因素认证，以及「记住我」的长期会话。
-- 引入内容安全策略（CSP）响应头，进一步收紧前端可执行范围。
 - 用视频 HLS 分片（`.m3u8`）承载长视频，按需加载不同码率。
 - 引入 EXIF 缩略图作为首屏占位（低质量图片占位符 LQIP）。
 - 增加 URL 查询参数同步（如 `?album=street&type=video`），便于分享筛选结果。

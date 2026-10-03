@@ -34,6 +34,11 @@ ROOT_PATH = Path(ROOT)
 DEFAULT_PORT = 8000
 IMAGE_DIR = ROOT_PATH / "assets" / "img" / "photos"
 
+# 静态白名单：与 admin.py 保持一致，项目根目录下的后端源码、adminlib/、
+# admin.config.json（含密码哈希与会话密钥）等一律不对外提供。
+STATIC_ROOT_FILES = {"index.html", "favicon.svg"}
+STATIC_ROOT_DIRS = {"assets", "data"}
+
 STORE = store.Store(ROOT_PATH)
 
 
@@ -45,9 +50,64 @@ def first(params: dict[str, list[str]], key: str, default: str = "") -> str:
 class Handler(http.server.SimpleHTTPRequestHandler):
     """开发用静态处理器：禁用缓存，便于修改后刷新即生效；另带公开只读接口。"""
 
+    server_version = "CollectionOfTimeDev"   # 不暴露版本号与 Python 版本
+    sys_version = ""
+
+    def version_string(self) -> str:
+        return self.server_version
+
     def end_headers(self) -> None:  # noqa: D102
         self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "same-origin")
+        # 与 admin.py 保持一致：前端不用内联脚本 / 样式，因此无需 'unsafe-inline'
+        self.send_header("Content-Security-Policy", "; ".join([
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "img-src 'self' data: https: http:",
+            "media-src 'self' https: http:",
+            "frame-src https: http:",
+            "connect-src 'self'",
+            "font-src 'self'",
+            "frame-ancestors 'self'",
+            "base-uri 'self'",
+            "form-action 'self'",
+            "object-src 'none'",
+        ]))
         super().end_headers()
+
+    def list_directory(self, path):                             # noqa: ANN001
+        """禁止目录列表（与 admin.py 一致）。"""
+        self.send_error(http.HTTPStatus.FORBIDDEN, "Directory listing is disabled")
+        return None
+
+    def static_allowed(self, target: Path) -> bool:
+        """静态白名单：只放行前端真正需要的路径，其余一律 404。
+
+        以解析后的真实路径判断（而非请求字符串），因此
+        `/assets/../admin.config.json` 这类穿越写法同样会被拒绝。
+        """
+        try:
+            relative = target.resolve().relative_to(ROOT_PATH.resolve())
+        except (OSError, ValueError):
+            return False
+
+        parts = relative.parts
+        if any(part.startswith(".") for part in parts):
+            return False                       # .git / .backups / .gitignore 等
+        if not parts:
+            return True                        # 站点根目录，交给 index.html 兜底
+        if len(parts) == 1:
+            return parts[0] in STATIC_ROOT_FILES or parts[0] in STATIC_ROOT_DIRS
+        return parts[0] in STATIC_ROOT_DIRS
+
+    def send_head(self):                       # noqa: ANN201
+        if not self.static_allowed(Path(self.translate_path(self.path))):
+            self.send_error(http.HTTPStatus.NOT_FOUND, "Not Found")
+            return None
+        return super().send_head()
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: D102
         sys.stderr.write("  %s\n" % (fmt % args))

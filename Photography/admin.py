@@ -118,8 +118,13 @@ def _first(params: dict[str, list[str]], key: str, default: str = "") -> str:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    server_version = "CollectionOfTimeAdmin/1.0"
+    server_version = "CollectionOfTime"     # 不暴露具体版本号
+    sys_version = ""                        # 也不暴露 Python 版本
     protocol_version = "HTTP/1.1"
+
+    def version_string(self) -> str:
+        """响应头里的 Server 值：整站统一成产品名，减少指纹。"""
+        return self.server_version
 
     def __init__(self, *args, **kwargs) -> None:
         # 静态资源一律相对项目根目录解析。若交给默认行为（当前工作目录），
@@ -138,6 +143,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Content-Security-Policy", self.content_security_policy())
 
         # 仅当前端被部署到其它源（--allow-origin）时才回跨域头；
         # 带 Cookie 的跨域必须回具体 Origin，不能用 *
@@ -148,6 +154,53 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Vary", "Origin")
 
         super().end_headers()
+
+    def content_security_policy(self) -> str:
+        """按页面给出 CSP，收紧可执行来源。
+
+        前台要允许外链播放器（YouTube / 哔哩哔哩等）与外部图片；
+        后台不嵌任何外部资源，只放行同源与 `--allow-origin` 列出的接口地址。
+        前端已不使用内联脚本 / 内联样式，因此这里不需要 'unsafe-inline'。
+        """
+        origins = [origin for origin in (getattr(self.server, "allow_origins", []) or [])
+                   if origin and origin != "*"]
+
+        if self.path.startswith("/admin"):
+            connect = " ".join(["'self'", *origins])
+            return "; ".join([
+                "default-src 'self'",
+                "script-src 'self'",
+                "style-src 'self'",
+                "img-src 'self' data: https:",
+                "media-src 'self' https:",
+                f"connect-src {connect}",
+                "font-src 'self'",
+                "frame-ancestors 'self'",
+                "base-uri 'self'",
+                "form-action 'self'",
+                "object-src 'none'",
+            ])
+
+        connect = " ".join(["'self'", *origins])
+        return "; ".join([
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "img-src 'self' data: https: http:",
+            "media-src 'self' https: http:",
+            "frame-src https: http:",              # 外链视频播放器
+            f"connect-src {connect}",
+            "font-src 'self'",
+            "frame-ancestors 'self'",
+            "base-uri 'self'",
+            "form-action 'self'",
+            "object-src 'none'",
+        ])
+
+    def list_directory(self, path):                            # noqa: ANN001
+        """禁止目录列表：只提供具体文件，避免把目录内容整份摊开。"""
+        self.send_error(HTTPStatus.FORBIDDEN, "Directory listing is disabled")
+        return None
 
     def cors_origin(self) -> str:
         allowed = getattr(self.server, "allow_origins", []) or []
@@ -1646,6 +1699,12 @@ def main() -> int:
         return 2
 
     SESSIONS.ttl_seconds = max(300, int(args.session_hours * 3600))
+
+    if external and not args.secure_cookie:
+        print("警告：当前以明文 HTTP 对外监听，密码与会话 Cookie 会以明文传输。", file=sys.stderr)
+        print("      请放在 HTTPS 反向代理之后（识别到 X-Forwarded-Proto: https 时 Cookie 会自动带 Secure），",
+              file=sys.stderr)
+        print("      或改用 SSH 端口转发访问（见 DEPLOY.md「部署方式」）。", file=sys.stderr)
 
     if not ADMIN_DIR.is_dir():
         print(f"警告：后台界面目录不存在：{ADMIN_DIR}", file=sys.stderr)

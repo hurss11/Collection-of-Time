@@ -146,6 +146,10 @@ location /       { root /opt/photography-linux-x64-XXXX; }
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
+> 反代不要剥离后端的安全响应头（`Content-Security-Policy`、`X-Frame-Options`、
+> `X-Content-Type-Options`、`Referrer-Policy`）。CSP 里脚本与样式都只允许同源外部文件——
+> 前端不含内联脚本 / 样式，因此不需要放开 `unsafe-inline`；覆盖或追加 CSP 时请保留这条约束。
+
 > **注意**：作品集前台的搜索 / 筛选 / 排序与 EXIF 解析现在都由后端提供
 > （`/api/public/*`），上面的 `location /api/` 规则已经把它们一并代理过去。
 > 如果只把静态目录裸露出去（不经后端），前台会拿不到数据——

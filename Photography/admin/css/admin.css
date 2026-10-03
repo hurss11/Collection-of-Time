@@ -319,6 +319,7 @@
 .log__time { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-mute); flex: none; }
 .log__action { flex: none; color: var(--accent); }
 .log__detail { color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log__detail--err { color: var(--danger); }
 
 .issue { font-size: 12.5px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
 .issue:last-child { border-bottom: 0; }

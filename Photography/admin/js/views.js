@@ -39,9 +39,9 @@ function thumbCell(cell) {
   if (!url || cell.missing) {
     return `<span class="badge badge--missing">${escapeHtml(cell.fallback || '缺失')}</span>`;
   }
+  // 加载失败由 app.js 的捕获阶段监听统一降级成角标（不用内联 onerror，便于收紧 CSP）
   return `<img class="${className}" src="${escapeHtml(assetUrl(url))}" alt="" loading="lazy"
-      onerror="this.replaceWith(Object.assign(document.createElement('span'),
-        {className:'badge badge--missing',textContent:'缺失'}))" />`;
+      data-fallback="${escapeHtml(cell.fallback || '缺失')}" />`;
 }
 
 function taglist(tags) {
@@ -220,7 +220,7 @@ export function renderHistory(history) {
       <li>
         <span class="log__time">${escapeHtml(entry.at)}</span>
         <span class="log__action">${escapeHtml(entry.action)}</span>
-        <span class="log__detail" style="${entry.ok ? '' : 'color:var(--danger)'}">${escapeHtml(entry.detail)}</span>
+        <span class="log__detail${entry.ok ? '' : ' log__detail--err'}">${escapeHtml(entry.detail)}</span>
       </li>`).join('')
     : '<li class="muted">本次启动后还没有操作记录。</li>';
 }
