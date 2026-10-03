@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1067" width="1600" height="1067" role="img" aria-label="占位图 03：光影人像">
+  <defs>
+    <radialGradient id="g03" cx="0.32" cy="0.3" r="0.85">
+      <stop offset="0" stop-color="#ffe3c2"/>
+      <stop offset="0.45" stop-color="#e08a55"/>
+      <stop offset="1" stop-color="#2a1410"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="1067" fill="url(#g03)"/>
+  <ellipse cx="620" cy="520" rx="230" ry="300" fill="#1a0e0b" opacity="0.35"/>
+  <path d="M300 1067 C320 800 460 690 620 690 C790 690 930 810 950 1067 Z" fill="#170c09" opacity="0.4"/>
+  <text x="72" y="140" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="44" fill="#ffffff" opacity="0.85">DEMO 03 · PORTRAIT</text>
+</svg>

@@ -1,0 +1,170 @@
+[
+  {
+    "id": "p-001",
+    "title": "日出前的山脊线",
+    "album": "landscape",
+    "src": "assets/img/ph-01.svg",
+    "thumb": "assets/img/ph-01.svg",
+    "date": "2026-01-18 06:42:00",
+    "location": "川西 · 折多山",
+    "description": "第一缕光越过垭口，山脊被压成层层叠叠的剪影。",
+    "tags": ["日出", "山脉", "长焦", "高原"],
+    "exif": {
+      "camera": "Sony α7 IV",
+      "lens": "FE 70-200mm F2.8 GM II",
+      "focalLength": "135 mm",
+      "aperture": "f/5.6",
+      "shutter": "1/250 s",
+      "iso": "ISO 200",
+      "dateTimeOriginal": "2026-01-18 06:42:00",
+      "dimensions": "7008 × 4672"
+    }
+  },
+  {
+    "id": "p-002",
+    "title": "雨夜的十字路口",
+    "album": "street",
+    "src": "assets/img/ph-02.svg",
+    "thumb": "assets/img/ph-02.svg",
+    "date": "2025-11-03 21:15:00",
+    "location": "东京 · 涩谷",
+    "description": "倒影把霓虹拉长，行人像在对岸的时间线里穿过。",
+    "tags": ["夜景", "雨天", "霓虹", "街拍"],
+    "exif": {
+      "camera": "Fujifilm X-T5",
+      "lens": "XF 23mm F1.4 R LM WR",
+      "focalLength": "23 mm",
+      "aperture": "f/1.4",
+      "shutter": "1/60 s",
+      "iso": "ISO 1250",
+      "dateTimeOriginal": "2025-11-03 21:15:00",
+      "dimensions": "7728 × 5152"
+    }
+  },
+  {
+    "id": "p-003",
+    "title": "窗边的侧光",
+    "album": "portrait",
+    "src": "assets/img/ph-03.svg",
+    "thumb": "assets/img/ph-03.svg",
+    "date": "2025-09-27 16:05:00",
+    "location": "室内 · 工作室",
+    "description": "只用一扇北向窗，让明暗过渡自然落在颧骨上。",
+    "tags": ["人像", "自然光", "胶片感"],
+    "exif": {
+      "camera": "Canon EOS R6 Mark II",
+      "lens": "RF 85mm F1.2L USM",
+      "focalLength": "85 mm",
+      "aperture": "f/1.8",
+      "shutter": "1/320 s",
+      "iso": "ISO 100",
+      "dateTimeOriginal": "2025-09-27 16:05:00",
+      "dimensions": "6000 × 4000"
+    }
+  },
+  {
+    "id": "p-004",
+    "title": "银河升起之前",
+    "album": "night",
+    "src": "assets/img/ph-04.svg",
+    "thumb": "assets/img/ph-04.svg",
+    "date": "2025-08-14 23:48:00",
+    "location": "青海 · 冷湖",
+    "description": "20 秒曝光留下星点，前景的岩石靠微光补了一档。",
+    "tags": ["星空", "长曝光", "银河"],
+    "exif": {
+      "camera": "Nikon Z6 III",
+      "lens": "NIKKOR Z 20mm F1.8 S",
+      "focalLength": "20 mm",
+      "aperture": "f/1.8",
+      "shutter": "20 s",
+      "iso": "ISO 3200",
+      "dateTimeOriginal": "2025-08-14 23:48:00",
+      "dimensions": "6048 × 4024"
+    }
+  },
+  {
+    "id": "p-005",
+    "title": "雾中松林",
+    "album": "landscape",
+    "src": "assets/img/ph-05.svg",
+    "thumb": "assets/img/ph-05.svg",
+    "date": "2025-06-02 07:10:00",
+    "location": "黄山 · 北海",
+    "description": "云海漫过树线，长焦压缩后像一幅水墨。",
+    "tags": ["云雾", "森林", "水墨", "长焦"],
+    "exif": {
+      "camera": "Sony α7R V",
+      "lens": "FE 100-400mm F4.5-5.6 GM",
+      "focalLength": "280 mm",
+      "aperture": "f/8",
+      "shutter": "1/160 s",
+      "iso": "ISO 400",
+      "dateTimeOriginal": "2025-06-02 07:10:00",
+      "dimensions": "9504 × 6336"
+    }
+  },
+  {
+    "id": "p-006",
+    "title": "站台末班车",
+    "album": "street",
+    "src": "assets/img/ph-06.svg",
+    "thumb": "assets/img/ph-06.svg",
+    "date": "2025-03-11 23:02:00",
+    "location": "上海 · 地铁站",
+    "description": "关门前的一秒，玻璃门把候车的人切成两半。",
+    "tags": ["街拍", "夜景", "黑白", "通勤"],
+    "exif": {
+      "camera": "Leica Q3",
+      "lens": "Summilux 28mm f/1.7 ASPH",
+      "focalLength": "28 mm",
+      "aperture": "f/2.0",
+      "shutter": "1/125 s",
+      "iso": "ISO 800",
+      "dateTimeOriginal": "2025-03-11 23:02:00",
+      "dimensions": "9520 × 6336"
+    }
+  },
+  {
+    "id": "p-007",
+    "title": "逆光下的轮廓",
+    "album": "portrait",
+    "src": "assets/img/ph-03.svg",
+    "thumb": "assets/img/ph-03.svg",
+    "date": "2025-02-19 17:30:00",
+    "location": "户外 · 天台",
+    "description": "让太阳压住轮廓，用反光板把面部提回中间调。",
+    "tags": ["人像", "逆光", "金色时刻"],
+    "exif": {
+      "camera": "Canon EOS R5",
+      "lens": "RF 135mm F1.8L IS USM",
+      "focalLength": "135 mm",
+      "aperture": "f/2.2",
+      "shutter": "1/2000 s",
+      "iso": "ISO 100",
+      "dateTimeOriginal": "2025-02-19 17:30:00",
+      "dimensions": "8192 × 5464"
+    }
+  },
+  {
+    "id": "p-008",
+    "title": "星轨 90 分钟",
+    "album": "night",
+    "src": "assets/img/ph-04.svg",
+    "thumb": "assets/img/ph-04.svg",
+    "date": "2024-12-30 22:00:00",
+    "location": "内蒙古 · 乌兰哈达",
+    "description": "180 张 30 秒堆栈，北极星落在画面左上三分点。",
+    "tags": ["星轨", "堆栈", "长曝光", "星空"],
+    "exif": {
+      "camera": "Sony α7 III",
+      "lens": "FE 14mm F1.8 GM",
+      "focalLength": "14 mm",
+      "aperture": "f/2.8",
+      "shutter": "30 s",
+      "iso": "ISO 1600",
+      "dateTimeOriginal": "2024-12-30 22:00:00",
+      "dimensions": "6000 × 4000"
+    }
+  }
+]

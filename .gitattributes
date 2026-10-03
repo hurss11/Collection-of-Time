@@ -1,0 +1,49 @@
+# 统一行尾策略
+# 仓库里一律存 LF：Windows 上 clone 不会给脚本加上回车，
+# 否则 run.sh 传到 Linux 服务器上会报 "$'\r': command not found"。
+* text=auto eol=lf
+
+# 脚本与源码：强制 LF
+*.sh    text eol=lf
+*.py    text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.svg   text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制：不做任何行尾转换
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.avif   binary
+*.mp4    binary
+*.mov    binary
+*.mkv    binary
+*.avi    binary
+*.webm   binary
+*.mp3    binary
+*.wav    binary
+*.m4a    binary
+*.zip    binary
+*.tar.gz binary
+*.tar.xz binary
+*.gz     binary
+*.xz     binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.ico    binary
+
+# bin/ 下是各平台的 ffmpeg 可执行文件，绝不能被改行尾
+bin/*   binary
+
+# 迁移包与数据库文件
+dist/*  binary

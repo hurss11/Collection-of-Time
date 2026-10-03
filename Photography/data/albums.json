@@ -1,0 +1,26 @@
+[
+  {
+    "id": "landscape",
+    "name": "山野与旷野",
+    "description": "高原、峡谷与长焦压缩下的层叠山脊。",
+    "cover": "assets/img/ph-01.svg"
+  },
+  {
+    "id": "street",
+    "name": "城市街角",
+    "description": "通勤、雨夜与霓虹，属于城市的即兴时刻。",
+    "cover": "assets/img/ph-02.svg"
+  },
+  {
+    "id": "portrait",
+    "name": "光影人像",
+    "description": "自然光与环境反射下的肖像练习。",
+    "cover": "assets/img/ph-03.svg"
+  },
+  {
+    "id": "night",
+    "name": "星野长夜",
+    "description": "银河、星轨与超长曝光的等待。",
+    "cover": "assets/img/ph-04.svg"
+  }
+]

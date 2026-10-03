@@ -1,0 +1,62 @@
+[
+  {
+    "id": "v-001",
+    "title": "折多山日出延时",
+    "album": "landscape",
+    "provider": "file",
+    "src": "assets/video/landscape-sunrise.mp4",
+    "poster": "assets/video/posters/v-001.svg",
+    "posterTime": 2,
+    "duration": 48,
+    "resolution": "3840 × 2160",
+    "date": "2026-01-18 06:20:00",
+    "location": "川西 · 折多山",
+    "description": "720 张照片合成的日出色温变化，跨度约 40 分钟。",
+    "tags": ["延时摄影", "日出", "山脉", "4K"],
+    "exif": {
+      "camera": "Sony α7 IV",
+      "lens": "FE 16-35mm F2.8 GM",
+      "fps": "30 fps",
+      "codec": "H.265 / HEVC"
+    }
+  },
+  {
+    "id": "v-002",
+    "title": "星轨转动的 90 分钟",
+    "album": "night",
+    "provider": "file",
+    "src": "assets/video/star-trails-timelapse.mp4",
+    "poster": "assets/video/posters/v-002.svg",
+    "posterTime": 3,
+    "duration": 32,
+    "resolution": "3840 × 2160",
+    "date": "2024-12-30 22:00:00",
+    "location": "内蒙古 · 乌兰哈达",
+    "description": "180 张 30 秒曝光的序列，后期用堆栈 + 逐帧延时呈现。",
+    "tags": ["延时摄影", "星轨", "星空", "4K"],
+    "exif": {
+      "camera": "Sony α7 III",
+      "lens": "FE 14mm F1.8 GM",
+      "fps": "24 fps",
+      "codec": "H.264"
+    }
+  },
+  {
+    "id": "v-003",
+    "title": "雨夜涩谷 4K 步行记录",
+    "album": "street",
+    "provider": "bilibili",
+    "src": "BV1xxxxxxxxx",
+    "poster": "assets/video/posters/v-003.svg",
+    "duration": "12:05",
+    "resolution": "3840 × 2160",
+    "date": "2025-11-04 20:30:00",
+    "location": "东京 · 涩谷",
+    "description": "外链嵌入示例：把 provider 设为 bilibili，src 填 BV 号或完整链接即可。",
+    "tags": ["街拍", "夜景", "步行视频", "外链"],
+    "exif": {
+      "camera": "DJI Osmo Pocket 3",
+      "fps": "60 fps"
+    }
+  }
+]

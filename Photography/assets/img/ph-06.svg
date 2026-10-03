@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1067" width="1600" height="1067" role="img" aria-label="占位图 06：站台末班车">
+  <defs>
+    <linearGradient id="g06" x1="0" y1="0" x2="1" y2="0.8">
+      <stop offset="0" stop-color="#0d0f12"/>
+      <stop offset="0.55" stop-color="#3a4048"/>
+      <stop offset="1" stop-color="#9aa6b4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="1067" fill="url(#g06)"/>
+  <path d="M0 780 L1600 560 L1600 1067 L0 1067 Z" fill="#101317" opacity="0.75"/>
+  <g stroke="#e8eef6" stroke-width="14" opacity="0.5">
+    <line x1="420" y1="0" x2="420" y2="1067"/>
+    <line x1="1180" y1="0" x2="1180" y2="1067"/>
+  </g>
+  <rect x="470" y="300" width="660" height="700" rx="10" fill="#000000" opacity="0.3"/>
+  <circle cx="800" cy="230" r="58" fill="#ffffff" opacity="0.55"/>
+  <text x="72" y="140" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="44" fill="#ffffff" opacity="0.85">DEMO 06 · PLATFORM</text>
+</svg>

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>后台 · Collection of Time</title>
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+
+  <!-- 前后端分离时改这里：把 api-base 指向后端地址即可，前端代码无需改动 -->
+  <meta name="api-base" content="auto" />
+
+  <link rel="stylesheet" href="/admin/css/base.css" />
+  <link rel="stylesheet" href="/admin/css/login.css" />
+  <link rel="stylesheet" href="/admin/css/admin.css" />
+</head>
+<body>
+  <!-- ============ 启动加载态（避免登录页 / 后台闪烁） ============ -->
+  <div class="boot" id="boot">
+    <span class="spinner" aria-hidden="true"></span>
+    <p>正在连接后台服务…</p>
+  </div>
+
+  <!-- ============ 登录 / 首次创建账号 ============ -->
+  <div class="login" id="view-login" hidden>
+    <div class="login__card">
+      <div class="login__brand">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span>
+          <strong>Collection of Time</strong>
+          <small>内容后台</small>
+        </span>
+      </div>
+
+      <h1 id="login-title">登录后台</h1>
+      <p class="login__sub muted" id="login-sub">请输入管理员账号与密码。</p>
+
+      <form class="form" id="login-form" novalidate>
+        <label class="field" id="login-username-field">
+          <span>用户名</span>
+          <input class="input" id="login-username" name="username"
+                 autocomplete="username" autocapitalize="off" spellcheck="false" required />
+        </label>
+
+        <label class="field">
+          <span>密码</span>
+          <span class="pwd">
+            <input class="input" id="login-password" name="password" type="password"
+                   autocomplete="current-password" required />
+            <button class="pwd__toggle" id="login-pwd-toggle" type="button">显示</button>
+          </span>
+        </label>
+
+        <label class="field" id="login-confirm-field" hidden>
+          <span>确认密码</span>
+          <input class="input" id="login-confirm" name="confirm" type="password" autocomplete="new-password" />
+        </label>
+
+        <div class="pwd-strength" id="login-strength" data-level="0" hidden>
+          <span class="pwd-strength__bar"><i></i></span>
+          <span class="pwd-strength__label muted"></span>
+        </div>
+
+        <p class="login__error" id="login-error" role="alert" hidden></p>
+
+        <button class="btn btn--primary btn--block" id="login-submit" type="submit">登录</button>
+      </form>
+
+      <p class="login__foot muted">
+        会话保存在 HttpOnly Cookie 中，写操作另有 CSRF 校验。
+        <span class="login__version">v<span data-version></span></span>
+      </p>
+    </div>
+  </div>
+
+  <!-- ============ 后台主界面 ============ -->
+  <div class="layout" id="view-app" hidden>
+  <!-- ============ 侧边栏 ============ -->
+  <aside class="sidebar">
+    <div class="sidebar__brand">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span>
+        <strong>Photography</strong>
+        <small>内容后台</small>
+      </span>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav__item is-active" data-pane="overview" type="button"><i>◈</i>概览</button>
+      <button class="nav__item" data-pane="photos" type="button"><i>▣</i>照片<span class="nav__count" data-count="photos">0</span></button>
+      <button class="nav__item" data-pane="videos" type="button"><i>▶</i>视频<span class="nav__count" data-count="videos">0</span></button>
+      <button class="nav__item" data-pane="albums" type="button"><i>▤</i>相册<span class="nav__count" data-count="albums">0</span></button>
+      <button class="nav__item" data-pane="upload" type="button"><i>↑</i>上传</button>
+      <button class="nav__item" data-pane="backups" type="button"><i>⟲</i>备份</button>
+      <button class="nav__item" data-pane="account" type="button"><i>☺</i>账号</button>
+    </nav>
+
+    <div class="sidebar__foot">
+      <div class="pill" id="ffmpeg-pill" title="FFmpeg 状态">检测中…</div>
+      <div class="user-chip">
+        <span class="user-chip__avatar" aria-hidden="true">☺</span>
+        <span class="user-chip__info">
+          <strong id="current-user">—</strong>
+          <small id="current-user-since"></small>
+        </span>
+      </div>
+      <a class="ghost-btn ghost-btn--block" href="/" target="_blank" rel="noopener">打开站点 ↗</a>
+    </div>
+  </aside>
+
+  <!-- ============ 主体 ============ -->
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pane-title">概览</h1>
+        <p class="topbar__sub" id="pane-sub">数据来源：<code>data/*.json</code></p>
+      </div>
+      <span class="save-hint" id="save-hint"></span>
+    </header>
+
+    <!-- ---------- 概览 ---------- -->
+    <section class="pane is-active" data-pane="overview">
+      <div class="stat-grid" id="stat-grid"></div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2 class="card__title">数据完整性</h2>
+          <div id="integrity"></div>
+        </div>
+        <div class="card">
+          <h2 class="card__title">最近操作</h2>
+          <ul class="log" id="history"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 照片 / 视频 ---------- -->
+    <section class="pane" data-pane="photos">
+      <div class="toolbar">
+        <input class="input" id="search-photos" type="search" placeholder="筛选标题 / 相册 / 标签…" />
+        <button class="btn" data-action="add" data-collection="photos" type="button">＋ 新增照片</button>
+      </div>
+      <div class="table-wrap"><table class="table" id="table-photos"></table></div>
+    </section>
+
+    <section class="pane" data-pane="videos">
+      <div class="toolbar">
+        <input class="input" id="search-videos" type="search" placeholder="筛选标题 / 来源 / 标签…" />
+        <button class="btn" data-action="add" data-collection="videos" type="button">＋ 新增视频</button>
+      </div>
+      <div class="table-wrap"><table class="table" id="table-videos"></table></div>
+    </section>
+
+    <!-- ---------- 相册 ---------- -->
+    <section class="pane" data-pane="albums">
+      <div class="toolbar">
+        <span class="muted">相册的 id 会被照片 / 视频的 <code>album</code> 字段引用，修改 id 不会自动更新引用。</span>
+        <button class="btn" data-action="add" data-collection="albums" type="button">＋ 新增相册</button>
+      </div>
+      <div class="table-wrap"><table class="table" id="table-albums"></table></div>
+    </section>
+
+    <!-- ---------- 上传 ---------- -->
+    <section class="pane" data-pane="upload">
+      <div class="upload-grid">
+        <div class="card">
+          <h2 class="card__title">选择文件</h2>
+          <div class="dropzone" id="dropzone" tabindex="0">
+            <input id="file-input" type="file" multiple hidden
+                   accept=".jpg,.jpeg,.png,.webp,.avif,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi" />
+            <span class="dropzone__glyph">↑</span>
+            <p><strong>把文件拖到这里</strong>，或点击选择</p>
+            <p class="muted">支持 JPG / PNG / WebP / TIFF 与 MP4 / MOV / WebM / MKV，可多选</p>
+          </div>
+          <div class="queue" id="queue"></div>
+        </div>
+
+        <div class="card">
+          <h2 class="card__title">上传选项</h2>
+          <div class="form" id="upload-options">
+            <label class="field">
+              <span>相册</span>
+              <select class="input" id="up-album"></select>
+            </label>
+            <label class="field">
+              <span>标签（逗号分隔）</span>
+              <input class="input" id="up-tags" placeholder="日出, 长焦" />
+            </label>
+            <label class="field">
+              <span>日期（留空则用 EXIF）</span>
+              <input class="input" id="up-date" placeholder="2026-01-18 06:42:00" />
+            </label>
+            <label class="field">
+              <span>地点</span>
+              <input class="input" id="up-location" placeholder="川西 · 折多山" />
+            </label>
+            <label class="field">
+              <span>描述</span>
+              <textarea class="input" id="up-description" rows="2"></textarea>
+            </label>
+            <label class="check"><input type="checkbox" id="up-exif" checked /> 图片：自动读取 EXIF 填充参数</label>
+            <label class="check"><input type="checkbox" id="up-thumb" checked /> 图片：用 ffmpeg 生成缩略图（800px）</label>
+            <label class="check"><input type="checkbox" id="up-poster" checked /> 视频：用 ffmpeg 抓帧生成封面</label>
+            <button class="btn btn--primary" id="up-start" type="button" disabled>开始上传</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="upload-result" hidden>
+        <h2 class="card__title">上传结果</h2>
+        <div id="upload-result-body"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 备份 ---------- -->
+    <section class="pane" data-pane="backups">
+      <div class="grid-2">
+        <div class="card">
+          <h2 class="card__title">导出 / 导入</h2>
+          <p class="muted">导出会把相册、照片、视频合成一个 JSON 文件；导入可选择覆盖或按 id 合并。</p>
+          <div class="row">
+            <button class="btn btn--primary" id="btn-export" type="button">下载备份 JSON</button>
+            <label class="btn" for="import-input">导入 JSON…</label>
+            <input id="import-input" type="file" accept="application/json,.json" hidden />
+            <label class="check"><input type="checkbox" id="import-merge" /> 合并（同 id 覆盖）而非整体覆盖</label>
+          </div>
+        </div>
+        <div class="card">
+          <h2 class="card__title">本地自动备份</h2>
+          <p class="muted">每次保存前系统会自动备份到 <code>data/.backups/</code>，最多保留 40 份。</p>
+          <div class="table-wrap table-wrap--short"><table class="table" id="table-backups"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 账号 ---------- -->
+    <section class="pane" data-pane="account">
+      <div class="grid-2">
+        <div class="card">
+          <h2 class="card__title">登录账号</h2>
+          <dl class="kv">
+            <div><dt>用户名</dt><dd id="account-name">—</dd></div>
+            <div><dt>会话方式</dt><dd>HttpOnly Cookie + CSRF 双提交</dd></div>
+            <div><dt>前端版本</dt><dd>v<span data-version></span></dd></div>
+          </dl>
+          <div class="row">
+            <button class="btn btn--primary" id="btn-change-password" type="button">修改密码</button>
+            <button class="btn btn--danger" id="btn-logout" type="button">退出登录</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2 class="card__title">安全检查建议</h2>
+          <ul class="tips">
+            <li>对外提供服务时，请放在 HTTPS 反向代理之后，并确认 Cookie 带上了 <code>Secure</code>。</li>
+            <li>登录失败会按 IP + 用户名限流锁定，锁定期间即使密码正确也会被拒绝。</li>
+            <li>修改密码后，其它设备上的登录状态会立即失效。</li>
+            <li>忘记密码时，在服务器上执行 <code>python admin.py --reset-password</code>。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+  </div>
+
+  <!-- ============ 编辑弹窗 ============ -->
+  <div class="modal" id="modal" hidden>
+    <div class="modal__backdrop" data-close></div>
+    <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <header class="modal__head">
+        <h2 id="modal-title">编辑</h2>
+        <button class="icon-btn" data-close type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="modal__body"><div class="form" id="modal-form"></div></div>
+      <footer class="modal__foot">
+        <span class="muted" id="modal-hint"></span>
+        <div class="row">
+          <button class="btn" data-close type="button">取消</button>
+          <button class="btn btn--primary" id="modal-save" type="button">保存</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="/admin/js/app.js"></script>
+</body>
+</html>

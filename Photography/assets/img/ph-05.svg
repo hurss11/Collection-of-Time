@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1067" width="1600" height="1067" role="img" aria-label="占位图 05：雾中松林">
+  <defs>
+    <linearGradient id="g05" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#dfe6e0"/>
+      <stop offset="0.5" stop-color="#8fa79a"/>
+      <stop offset="1" stop-color="#26463c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="1067" fill="url(#g05)"/>
+  <g fill="#1d3530" opacity="0.35">
+    <polygon points="220,1067 300,560 380,1067"/>
+    <polygon points="520,1067 610,480 700,1067"/>
+    <polygon points="880,1067 960,600 1040,1067"/>
+    <polygon points="1220,1067 1300,520 1380,1067"/>
+  </g>
+  <rect y="620" width="1600" height="200" fill="#ffffff" opacity="0.35"/>
+  <rect y="800" width="1600" height="120" fill="#ffffff" opacity="0.22"/>
+  <text x="72" y="140" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="44" fill="#123027" opacity="0.8">DEMO 05 · FOREST</text>
+</svg>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" role="img" aria-label="视频封面占位图 02：星轨延时">
+  <defs>
+    <radialGradient id="p02" cx="0.5" cy="0.62" r="0.75">
+      <stop offset="0" stop-color="#14315c"/>
+      <stop offset="1" stop-color="#04070f"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#p02)"/>
+  <g fill="none" stroke="#9fd0ff" stroke-width="3" opacity="0.5">
+    <path d="M800 560 m -300 0 a300 300 0 1 1 600 0"/>
+    <path d="M800 560 m -230 0 a230 230 0 1 1 460 0"/>
+    <path d="M800 560 m -160 0 a160 160 0 1 1 320 0"/>
+    <path d="M800 560 m -90 0 a90 90 0 1 1 180 0"/>
+  </g>
+  <circle cx="800" cy="560" r="7" fill="#ffffff" opacity="0.95"/>
+  <path d="M0 780 L420 700 L900 810 L1280 720 L1600 800 L1600 900 L0 900 Z" fill="#02040a" opacity="0.7"/>
+  <text x="64" y="110" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="40" fill="#ffffff" opacity="0.85">DEMO VIDEO 02 · STAR TRAILS</text>
+</svg>

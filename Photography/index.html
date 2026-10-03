@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Collection of Time · 摄影作品集</title>
+  <meta name="description" content="一个轻量的摄影作品集：相册分类浏览、标签搜索、EXIF 元数据与灯箱大图。" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="assets/css/main.css" />
+  <link rel="stylesheet" href="assets/css/lightbox.css" />
+</head>
+<body>
+  <!-- ============ 顶部导航 ============ -->
+  <header class="site-header">
+    <a class="brand" href="./">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__text">
+        <strong>Collection of Time</strong>
+        <small>摄影作品集</small>
+      </span>
+    </a>
+    <nav class="site-nav" aria-label="主导航">
+      <a href="#gallery">作品</a>
+      <a href="#albums">相册</a>
+      <a href="#about">关于</a>
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="切换主题" title="切换主题">
+        <span class="icon-btn__glyph">◐</span>
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ============ Hero ============ -->
+    <section class="hero" id="about">
+      <p class="hero__eyebrow">Photography · 2026</p>
+      <h1 class="hero__title">把时间收藏起来</h1>
+      <p class="hero__desc">
+        每一张照片都是一次曝光、一段时间、一个决定。这里按相册与标签归档作品，
+        并保留完整的拍摄参数（EXIF）。
+      </p>
+      <dl class="hero__stats" id="hero-stats">
+        <div><dt>作品</dt><dd data-stat="photos">–</dd></div>
+        <div><dt>相册</dt><dd data-stat="albums">–</dd></div>
+        <div><dt>标签</dt><dd data-stat="tags">–</dd></div>
+      </dl>
+    </section>
+
+    <!-- ============ 工具栏：搜索 / 排序 ============ -->
+    <section class="toolbar" aria-label="筛选与搜索">
+      <div class="toolbar__row">
+        <label class="search" for="search-input">
+          <span class="search__icon" aria-hidden="true">⌕</span>
+          <input id="search-input" type="search" placeholder="搜索标题、地点、相机或标签…" autocomplete="off" />
+          <button id="search-clear" class="search__clear" type="button" aria-label="清空搜索" hidden>×</button>
+        </label>
+        <label class="select">
+          <span>排序</span>
+          <select id="sort-select">
+            <option value="date-desc">拍摄时间（新 → 旧）</option>
+            <option value="date-asc">拍摄时间（旧 → 新）</option>
+            <option value="title-asc">标题（A → Z）</option>
+            <option value="album">相册分组</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="toolbar__row toolbar__row--chips">
+        <div class="chipgroup" id="type-filter" data-role="types">
+          <span class="chipgroup__label">类型</span>
+        </div>
+      </div>
+
+      <div class="toolbar__row toolbar__row--chips">
+        <div class="chipgroup" id="album-filter" data-role="albums">
+          <span class="chipgroup__label">相册</span>
+        </div>
+        <div class="chipgroup" id="tag-filter" data-role="tags">
+          <span class="chipgroup__label">标签</span>
+        </div>
+      </div>
+
+      <div class="toolbar__row toolbar__row--meta">
+        <p class="result-count" id="result-count" aria-live="polite"></p>
+        <button id="filter-reset" class="link-btn" type="button">重置筛选</button>
+      </div>
+    </section>
+
+    <!-- ============ 相册总览 ============ -->
+    <section class="albums" id="albums" aria-label="相册总览">
+      <h2 class="section-title">相册</h2>
+      <div class="album-grid" id="album-grid"></div>
+    </section>
+
+    <!-- ============ 作品网格 ============ -->
+    <section class="gallery-section" id="gallery" aria-label="作品列表">
+      <h2 class="section-title">作品</h2>
+      <div class="gallery" id="gallery-grid" role="list"></div>
+      <p class="empty-state" id="empty-state" hidden>
+        <span class="empty-state__glyph">⌀</span>
+        没有符合条件的作品，试试更换关键词或重置筛选。
+      </p>
+      <template id="skeleton-template">
+        <div class="card card--skeleton" aria-hidden="true">
+          <div class="card__media"></div>
+          <div class="card__body">
+            <span class="skeleton-line skeleton-line--lg"></span>
+            <span class="skeleton-line skeleton-line--sm"></span>
+          </div>
+        </div>
+      </template>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>© <span id="year"></span> Collection of Time · 用静态 HTML / CSS / JavaScript 构建</p>
+    <p class="site-footer__hint">提示：在本地通过 <code>python serve.py</code> 启动服务后访问，可正常读取 JSON 与 EXIF。</p>
+  </footer>
+
+  <!-- ============ 灯箱 ============ -->
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="大图查看" hidden>
+    <div class="lightbox__backdrop" data-lb-close></div>
+
+    <button class="lightbox__btn lightbox__close" type="button" data-lb-close aria-label="关闭（Esc）">×</button>
+    <button class="lightbox__btn lightbox__nav lightbox__nav--prev" type="button" data-lb-prev aria-label="上一张（←）">‹</button>
+    <button class="lightbox__btn lightbox__nav lightbox__nav--next" type="button" data-lb-next aria-label="下一张（→）">›</button>
+
+    <figure class="lightbox__stage">
+      <div class="lightbox__viewport">
+        <img class="lightbox__image" id="lb-image" alt="" />
+        <video class="lightbox__video" id="lb-video" controls playsinline preload="metadata" hidden></video>
+        <iframe class="lightbox__embed" id="lb-embed" title="外链视频播放器"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+                allowfullscreen referrerpolicy="origin" hidden></iframe>
+      </div>
+      <figcaption class="lightbox__caption">
+        <div class="lightbox__headline">
+          <h3 id="lb-title"></h3>
+          <p id="lb-subtitle"></p>
+        </div>
+        <div class="lightbox__panel">
+          <div class="exif" id="lb-exif"></div>
+          <button class="ghost-btn" id="lb-exif-parse" type="button">解析原文件 EXIF</button>
+        </div>
+      </figcaption>
+    </figure>
+
+    <p class="lightbox__counter" id="lb-counter"></p>
+  </div>
+
+  <script type="module" src="assets/js/app.js"></script>
+</body>
+</html>
