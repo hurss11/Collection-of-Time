@@ -39,6 +39,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from email import utils as email_utils
@@ -60,6 +61,7 @@ VIDEO_DIR = ROOT / "assets" / "video"
 POSTER_DIR = VIDEO_DIR / "posters"
 CONFIG_PATH = ROOT / auth.CONFIG_NAME
 UPLOAD_TMP_DIR = ROOT / "data" / ".tmp"       # 上传中的临时文件（静态白名单排除 . 开头的目录）
+ACTIVITY_PATH = ROOT / ".run" / "activity.json"   # 正在进行的上传计数（自动更新靠它避开上传中途重启）
 
 ALLOWED_UPLOAD_SUFFIXES = media.IMAGE_SUFFIXES | media.VIDEO_SUFFIXES
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024          # 单文件 512MB
@@ -91,6 +93,52 @@ TOOLS = media.detect_tools(ROOT, verify=True)
 ACCOUNTS = auth.AccountStore(CONFIG_PATH)
 SESSIONS = auth.SessionManager(ACCOUNTS, ttl_hours=12.0)
 LIMITER = auth.RateLimiter()
+
+
+class Activity:
+    """正在进行的上传计数，写到 `.run/activity.json`。
+
+    自动更新（`./run.sh update`）在重启前会读这个文件 —— **不在上传中途重启**：
+    上一次「上传中被重启」就是这样在页面上留下失效引用（卡片指着没上传成功的
+    文件名，一直 404）。写入失败绝不能影响上传本身，所以整段都吞异常。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.uploads = 0
+        self.finished = 0
+
+    def begin(self) -> None:
+        with self.lock:
+            self.uploads += 1
+            self._write()
+
+    def end(self) -> None:
+        with self.lock:
+            self.uploads = max(0, self.uploads - 1)
+            self.finished += 1
+            self._write()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {"uploads": self.uploads, "finished": self.finished}
+
+    def _write(self) -> None:
+        payload = {
+            "uploads": self.uploads,
+            "finished": self.finished,
+            "pid": os.getpid(),
+            "at": time.time(),
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            pass
+
+
+ACTIVITY = Activity(ACTIVITY_PATH)
 
 
 def ensure_default_album(*, when_unused: bool = False) -> tuple[bool, list[str]]:
@@ -1351,7 +1399,18 @@ class Handler(SimpleHTTPRequestHandler):
     # ---------- 上传 ----------
 
     def api_upload(self) -> None:
-        """批量上传：一次请求可带多个文件，逐条返回结果，前端只负责展示。"""
+        """批量上传：一次请求可带多个文件，逐条返回结果，前端只负责展示。
+
+        整段用 `ACTIVITY` 包起来：自动更新看到「正在上传」会推迟重启，
+        别把一次上传拦腰截断（那会在页面上留下指向不存在文件的卡片）。
+        """
+        ACTIVITY.begin()
+        try:
+            self._upload_batch()
+        finally:
+            ACTIVITY.end()
+
+    def _upload_batch(self) -> None:
         fields, files = self.read_multipart()
 
         uploads: list[dict] = []

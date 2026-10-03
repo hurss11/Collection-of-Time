@@ -450,6 +450,8 @@ python tools/fetch_ffmpeg.py --platform linux-arm64 --keep-archive
 
 **代码与数据是分开的**，升级只替换代码，不要动 `data/` 和 `assets/`。
 
+### 8.1 手动升级（迁移包）
+
 ```bash
 ./run.sh stop
 cp -a data data.bak.$(date +%Y%m%d)          # 保险起见先备份数据
@@ -462,6 +464,72 @@ rsync -av --exclude data/ --exclude assets/ --exclude admin.config.json \
 > 后台本身在每次保存前都会自动备份到 `data/.backups/`（保留最近 40 份），
 > 保存用的是「写临时文件 + 原子替换」，进程被 kill 也不会留下半截 JSON。
 > 改动想撤销，在后台「备份」页点一下恢复即可。
+
+### 8.2 自动热更新（推送完就自动生效）
+
+想让「本地 `git push` → 服务器自己换代码并重启」，需要两件事：部署目录是 **git 检出**，
+以及一个定时器。
+
+**第一步：接管成 git 检出**（用迁移包解压出来的目录没有 `.git`，只做这一次）
+
+```bash
+cd /opt/photography-linux-x64-xxxx        # 部署目录
+./run.sh autoupdate adopt --repo https://github.com/hurss11/Collection-of-Time.git
+```
+
+它会 `git init` → `remote add` → `fetch` → 把**代码**对齐到远端 `main`，并把代码路径之外的
+19 类跟踪文件（`data/*.json`、`assets/video/*`、`assets/img/*` 等）标记成「本地状态」。
+`data/`、`assets/` 里的上传内容、`admin.config.json`、`bin/`、`.run/` 一个字节都不会动。
+执行前会打印将要做什么并要求确认（`--yes` 可跳过）。
+
+**第二步：打开定时自动更新**
+
+```bash
+sudo ./run.sh autoupdate on                 # 每 5 分钟检查一次
+sudo ./run.sh autoupdate on --interval 15min
+./run.sh autoupdate status                  # 落后几个提交 / 定时器在不在
+./run.sh update                             # 立刻更新一次，不等定时器
+```
+
+之后本地 `git push` 到 `main`，服务器 5 分钟内自己换代码、重启并做健康检查。
+
+**它到底做了什么**（每一步都有意为之，别改成 `git pull`）：
+
+| 环节 | 做法 | 为什么 |
+| --- | --- | --- |
+| 更新范围 | 只替换 `CODE_PATHS`（`admin.py`、`adminlib/`、`admin/`、`assets/css|js`、`tools/`、`run.sh`、`index.html`、文档等） | `data/*.json` 与 `assets/` 里是你的真实内容：`git pull` / `git reset --hard` 会把它们换成仓库里的演示数据，等于数据丢失 |
+| 合并方式 | `git fetch` + **只快进**；本地有提交（分叉）直接拒绝 | 服务器上不该出现自动 merge / rebase 出来的意外提交 |
+| 作者 | 新提交的作者必须在 `.run/autoupdate.authors` 里（首次安装时按当时的 `main` 作者快照生成，之后只增不减） | 仓库被推到不认识的作者时停下来等你确认 |
+| 远端 | 地址与安装时记录的一致才继续 | 防误配 / 被换源 |
+| 时机 | 正在上传时**推迟**到下一轮（服务端写 `.run/activity.json`） | 上传中途重启会在页面上留下指向不存在文件的卡片（曾经就这样一路 404） |
+| 结果 | 重启后轮询 `/api/health`，不通就**自动回滚**到上一个版本并重新拉起 | 坏版本不会把站点留在打不开的状态 |
+| 记录 | 已应用版本在 `.run/autoupdate.state`；完整输出在 `journalctl -u photography-update` | 出问题知道该回哪一版 |
+
+**换机器 / 换了提交邮箱被拦下**时（提示「有未受信任的作者」）：
+
+```bash
+git log -1 --format=%ae          # 确认是你自己的邮箱
+./run.sh update --accept-authors # 显式把这个作者加入白名单
+```
+
+**其它情况**：
+
+- 服务器上有人手改过代码，更新会拒绝覆盖，提示「代码文件被本地改过」；
+  确认要放弃那些改动就用 `./run.sh update --force`。
+- 关掉自动更新：`sudo ./run.sh autoupdate off`（只删定时器，代码与数据都不动）。
+- 没有 systemd 的机器（容器 / BSD / macOS）改用 cron：
+
+  ```bash
+  (crontab -l 2>/dev/null; echo "*/5 * * * * cd /opt/photography && ./run.sh update --quiet >> .run/update.log 2>&1") | crontab -
+  ```
+
+> **安全边界（务必读）**：能往 `main` 推代码的人，等于能在这台服务器上执行代码。
+> 作者白名单、只快进、只换代码路径防的是「误配 / 意外覆盖 / 第三方扫到公开仓库」，
+> **防不了仓库本身被入侵**。介意的话就别开定时器，改成每次手动 `./run.sh update`
+> （同样只换代码、同样做健康检查与自动回滚）。
+>
+> 自动更新**不会**碰 `/etc/systemd/system/`：发布里如果改了单元模板（比如内存约束），
+> 更新后需要重装一次：`MEMORY_MAX=512M sudo ./run.sh systemd --install`。
 
 ---
 
@@ -495,6 +563,10 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 上传卡在 100% 不起作用 | 服务端在处理（读 EXIF / 生成缩略图与封面），大文件会花几秒；`journalctl -u photography-admin -f` 能看到耗时 |
 | 日志里成片的 400 / 414 / 505 | 扫描器发的畸形请求。现版本正常回 4xx 且只记一行访问日志；若仍伴随 traceback，说明代码是旧的（`grep -n def\ request_path admin.py` 无输出就该更新） |
 | 日志里 `GET /assets/... 404` | 上传途中有过一次服务重启，页面还引用着中断那次的旧文件名：强制刷新（手机端清站点数据）即可。先确认 `data/*.json` 里确实没有这条引用，再判断为前端残留 |
+| `./run.sh update` 说「不是 git 检出」 | 迁移包解压的部署没有 `.git`：先 `./run.sh autoupdate adopt --repo <仓库地址>`（见第 8.2 节） |
+| 更新提示「有未受信任的作者」 | 提交邮箱不在白名单里：`git log -1 --format=%ae` 确认是自己，然后 `./run.sh update --accept-authors` |
+| 更新一直「推迟」 | 有上传正在进行（正常行为，下一轮会重试）；`./run.sh autoupdate status` 会显示。急的话 `./run.sh update --force` |
+| 更新后服务起不来 | 已自动回滚并重新拉起，`journalctl -u photography-update -n 80` 看这次发布的问题；服务日志 `journalctl -u photography-admin -n 80` |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。
 

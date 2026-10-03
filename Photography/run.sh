@@ -16,6 +16,8 @@
 #   ./run.sh create-user    创建管理员账号
 #   ./run.sh reset-password 重置管理员密码
 #   ./run.sh systemd        生成 systemd 单元文件（可用 sudo 安装）
+#   ./run.sh update         拉取新代码并重启（只换代码，不碰数据；失败自动回滚）
+#   ./run.sh autoupdate     on|off|status|adopt 定时自动更新
 #   ./run.sh help           显示本帮助
 #
 # 可用环境变量：
@@ -554,6 +556,381 @@ systemd() {
   info "  # 等价的手工步骤："
   info "  sudo cp 上面输出 > /etc/systemd/system/$unit_name.service"
   info "  sudo systemctl daemon-reload && sudo systemctl enable --now $unit_name"
+}
+
+# ---------- 自动热更新 ----------
+#
+# 目标：本地 `git push` 之后，服务器在几分钟内自动换成新代码并重启，不用再登录
+# 服务器手动 pull + restart。实现要点（详见 adminlib/autoupdate.py 与 DEPLOY.md）：
+#   · 只换**代码路径**，data/ 与 assets/ 里的上传内容、admin.config.json 一律不碰；
+#   · 只快进，分叉就拒绝，绝不自动 merge；
+#   · 新提交的作者必须在白名单里（首次安装时按当时的作者快照生成）；
+#   · 正在上传时不重启，推迟到下一轮；
+#   · 重启后健康检查失败就自动回滚到上一个版本。
+
+ADMIN_SERVICE="photography-admin.service"
+AUTOUPDATE_SERVICE="photography-update.service"
+AUTOUPDATE_TIMER="photography-update.timer"
+AUTOUPDATE_LOCK="$RUN_DIR/autoupdate.lock"
+
+au() { py -m adminlib.autoupdate "$@"; }
+
+# 从 JSON 里取一个字段（嵌套用点号）
+json_get() {
+  py -c '
+import json, sys
+data = json.loads(sys.argv[1])
+for key in sys.argv[2].split("."):
+    data = data.get(key) if isinstance(data, dict) else None
+if data is None:
+    print("")
+elif isinstance(data, bool):
+    print("true" if data else "false")
+elif isinstance(data, (dict, list)):
+    print(json.dumps(data, ensure_ascii=False))
+else:
+    print(data)
+' "${1:-{\}}" "$2"
+}
+
+service_port() {
+  local port="${PORT:-}"
+  if [ -z "$port" ] && command -v systemctl >/dev/null 2>&1; then
+    port="$(systemctl show "$ADMIN_SERVICE" -p ExecStart 2>/dev/null \
+            | grep -oE -- '--port [0-9]+' | head -1 | awk '{print $2}')"
+  fi
+  printf '%s' "${port:-8080}"
+}
+
+# 服务在跑吗（systemd 常驻 或 run.sh 后台进程，任一种都算）
+service_running() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$ADMIN_SERVICE" 2>/dev/null; then
+    return 0
+  fi
+  is_running
+}
+
+under_systemd() {
+  command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$ADMIN_SERVICE" 2>/dev/null
+}
+
+restart_service() {
+  if under_systemd; then
+    step "重启：systemctl restart $ADMIN_SERVICE"
+    systemctl restart "$ADMIN_SERVICE"
+    return $?
+  fi
+  if ! is_running; then
+    return 0
+  fi
+  step "重启：./run.sh restart"
+  # 放到子 shell 里跑：restart 失败时会 die，别让它把整个 update 带走
+  ( restart )
+}
+
+# 「让服务处于运行状态」：进程已经死了（比如刚换上的新代码起不来）也要拉起来，
+# 否则回滚之后就只剩一个没人拉起的空档。注意：调用方只在「更新前服务是在跑的」
+# 前提下才用它，所以不会把运维特意停掉的服务弄起来。
+ensure_service_running() {
+  if under_systemd; then
+    step "拉起：systemctl restart $ADMIN_SERVICE"
+    systemctl restart "$ADMIN_SERVICE"
+    return $?
+  fi
+  if is_running; then
+    step "重启：./run.sh restart"
+    ( restart )
+  else
+    step "拉起：./run.sh start"
+    ( start )
+  fi
+}
+
+acquire_update_lock() {
+  mkdir -p "$RUN_DIR"
+  if mkdir "$AUTOUPDATE_LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" >"$AUTOUPDATE_LOCK/pid"
+    return 0
+  fi
+  local holder=""
+  [ -f "$AUTOUPDATE_LOCK/pid" ] && holder="$(tr -d '[:space:]' <"$AUTOUPDATE_LOCK/pid")"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    warn "已经有一个更新在跑（PID $holder），本次跳过"
+    return 1
+  fi
+  warn "清掉过期的更新锁（PID ${holder:-未知} 已经不在了）"
+  rm -rf "$AUTOUPDATE_LOCK"
+  mkdir "$AUTOUPDATE_LOCK" 2>/dev/null || return 1
+  printf '%s\n' "$$" >"$AUTOUPDATE_LOCK/pid"
+  return 0
+}
+
+release_update_lock() { rm -rf "$AUTOUPDATE_LOCK" 2>/dev/null || true; }
+
+_update_body() {
+  local force="$1" quiet="$2" accept_authors="$3"
+  local inspected state result applied needs_restart reason before_sha rolled port
+
+  # inspect 在「被拦下 / 分叉」时退出码是 3、网络失败是 1，但两种情况下标准输出里
+  # 都有完整 JSON —— 所以先拿 JSON，再按 state 决定，别因为退出码就提前 return。
+  local inspected="" inspect_rc=0
+  inspected="$(au inspect --json 2>"$RUN_DIR/autoupdate.err")" || inspect_rc=$?
+  if [ -z "$inspected" ]; then
+    err "检查更新失败：$(tail -n 1 "$RUN_DIR/autoupdate.err" 2>/dev/null)"
+    return 1
+  fi
+
+  state="$(json_get "$inspected" state)"
+  [ "$quiet" -eq 0 ] && printf '%s' "$inspected" | au show
+
+  case "$state" in
+    unchanged)
+      [ "$quiet" -eq 0 ] && ok "已是最新版本（$(json_get "$inspected" head_short)）"
+      return 0
+      ;;
+    update-available)
+      info "发现 $(json_get "$inspected" behind) 个新提交，开始更新"
+      ;;
+    blocked)
+      # 只有「作者不在白名单」这一条时，--accept-authors 才允许继续（交给 apply 放行）
+      if [ "$accept_authors" -eq 1 ] && [ "$(json_get "$inspected" new_authors)" != "[]" ] \
+         && [ "$(json_get "$inspected" dirty_code)" = "[]" ]; then
+        info "按 --accept-authors 放行新作者：$(json_get "$inspected" new_authors)"
+      else
+        err "不能自动更新：$(json_get "$inspected" blockers)"
+        return 1
+      fi
+      ;;
+    fetch-failed)
+      err "检查更新失败：$(json_get "$inspected" blockers)（下一轮会重试）"
+      return 1
+      ;;
+    *)
+      err "不能自动更新：$state —— $(json_get "$inspected" blockers)"
+      return 1
+      ;;
+  esac
+
+  local apply_args=()
+  [ "$force" -eq 1 ] && apply_args+=(--allow-dirty)
+  [ "$accept_authors" -eq 1 ] && apply_args+=(--accept-authors)
+  if ! result="$(au apply --json ${apply_args[@]+"${apply_args[@]}"} 2>"$RUN_DIR/autoupdate.err")"; then
+    err "更新失败：$(json_get "$result" reason)"
+    return 1
+  fi
+  if [ "$(json_get "$result" applied)" != "true" ]; then
+    err "没有应用更新：$(json_get "$result" reason)"
+    return 1
+  fi
+  ok "代码已替换：$(json_get "$result" head_short) → $(json_get "$result" remote_short)"
+
+  needs_restart="$(json_get "$result" restart_needed)"
+  reason="$(json_get "$result" reason)"
+  if [ "$needs_restart" != "true" ]; then
+    info "不需要重启：$reason"
+    return 0
+  fi
+
+  if ! service_running; then
+    warn "服务当前没在运行，代码已更新但没有重启（下次启动就是新版本）"
+    return 0
+  fi
+
+  before_sha="$(json_get "$result" head_short)"
+  ensure_service_running || warn "重启命令返回了非 0（继续做健康检查）"
+  port="$(service_port)"
+
+  if wait_health "http://127.0.0.1:$port/api/health" 40; then
+    ok "已更新并恢复正常（http://127.0.0.1:$port/api/health）"
+    return 0
+  fi
+
+  err "更新后健康检查没过，自动回滚到 $before_sha"
+  rolled="$(au rollback 2>/dev/null || true)"
+  if [ "$(json_get "$rolled" ok)" = "true" ]; then
+    ensure_service_running || warn "拉起服务失败（继续做健康检查）"
+    if wait_health "http://127.0.0.1:$port/api/health" 40; then
+      warn "已回滚并恢复正常。请查日志定位这次发布的问题："
+      info "  journalctl -u $ADMIN_SERVICE -n 80    或    ./run.sh logs 80"
+      return 1
+    fi
+    err "回滚后服务仍不健康，需要手工处理"
+    return 1
+  fi
+  err "回滚失败：$(json_get "$rolled" reason)"
+  return 1
+}
+
+update() {
+  local force=0 quiet=0 accept_authors=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force)          force=1; shift ;;   # 上传中也重启 / 允许覆盖本地改过的代码
+      --accept-authors) accept_authors=1; shift ;;   # 把本次提交的作者加入白名单
+      --quiet|-q)       quiet=1; shift ;;
+      *) die "未知参数：$1（用 ./run.sh help 查看用法）" ;;
+    esac
+  done
+
+  [ "$quiet" -eq 1 ] || banner
+  require_python
+
+  if [ ! -d "$APP_DIR/.git" ]; then
+    err "这里不是 git 检出，没法自动更新（用迁移包解压部署的目录就是这种）"
+    info ""
+    info "两条路："
+    info "  1) 就地接管成 git 检出（不会覆盖 data/、assets/、admin.config.json）："
+    info "     ./run.sh autoupdate adopt --repo https://github.com/hurss11/Collection-of-Time.git"
+    info "  2) 继续手工升级：本地 ./run.sh package → 上传 → 解压覆盖"
+    return 1
+  fi
+
+  if [ "$force" -eq 0 ] && au busy >/dev/null 2>&1; then
+    warn "正在上传，这次先不动（下一轮再试；急的话用 ./run.sh update --force）"
+    return 0
+  fi
+
+  acquire_update_lock || return 0
+  local rc=0
+  _update_body "$force" "$quiet" "$accept_authors" || rc=$?
+  release_update_lock
+  return "$rc"
+}
+
+autoupdate_status() {
+  banner
+  require_python
+  info ""
+  step "代码更新状态"
+  au inspect --no-fetch 2>/dev/null || true
+  info ""
+  if [ -s "$RUN_DIR/autoupdate.state" ]; then
+    info "上次应用： $(json_get "$(au state)" applied | cut -c1-8)  ($(json_get "$(au state)" at))"
+  fi
+  if au busy >/dev/null 2>&1; then
+    warn "此刻正在上传，更新会推迟到下一轮"
+  fi
+  info ""
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "$AUTOUPDATE_TIMER" 2>/dev/null; then
+      ok "定时器：已开启（$AUTOUPDATE_TIMER）"
+      systemctl list-timers "$AUTOUPDATE_TIMER" --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/  /'
+    else
+      warn "定时器：未开启 —— sudo ./run.sh autoupdate on 打开"
+    fi
+  else
+    info "这台机器没有 systemd：用 cron 定时跑 ./run.sh update --quiet"
+  fi
+}
+
+autoupdate_on() {
+  local interval="${UPDATE_INTERVAL:-5min}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --interval)   interval="${2:-}"; shift 2 ;;
+      --interval=*) interval="${1#*=}"; shift ;;
+      *) die "未知参数：$1（可用 --interval 5min）" ;;
+    esac
+  done
+
+  [ "$(id -u)" -eq 0 ] || die "安装定时器需要 root： sudo ./run.sh autoupdate on"
+  require_python
+  if ! command -v systemctl >/dev/null 2>&1; then
+    err "这台机器没有 systemd，改用 cron："
+    info "  (crontab -l 2>/dev/null; echo \"*/5 * * * * cd $APP_DIR && ./run.sh update --quiet >> .run/update.log 2>&1\") | crontab -"
+    return 1
+  fi
+  if [ ! -d "$APP_DIR/.git" ]; then
+    warn "这里不是 git 检出：定时器会因为 ConditionPathIsDirectory 直接跳过"
+    info "  先接管： ./run.sh autoupdate adopt --repo <仓库地址>"
+  fi
+
+  py -m adminlib.autoupdate units --interval "$interval" --out /etc/systemd/system >/dev/null \
+    || die "写出 systemd 单元文件失败"
+  systemctl daemon-reload
+  systemctl enable --now "$AUTOUPDATE_TIMER" || die "启用定时器失败"
+  ok "自动更新已开启：每 $interval 检查一次"
+  info ""
+  info "  立刻跑一次 ： ./run.sh update"
+  info "  看计划     ： systemctl list-timers $AUTOUPDATE_TIMER"
+  info "  看结果日志 ： journalctl -u $AUTOUPDATE_SERVICE -n 50"
+  info "  关掉       ： sudo ./run.sh autoupdate off"
+}
+
+autoupdate_off() {
+  [ "$(id -u)" -eq 0 ] || die "卸载定时器需要 root： sudo ./run.sh autoupdate off"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "$AUTOUPDATE_TIMER" 2>/dev/null || true
+  fi
+  rm -f "/etc/systemd/system/$AUTOUPDATE_TIMER" "/etc/systemd/system/$AUTOUPDATE_SERVICE"
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload
+  ok "自动更新已关闭（单元文件已删除；代码与数据都没动）"
+}
+
+autoupdate_adopt() {
+  local repo="${UPDATE_REPO:-}" branch="main" assume_yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo)      repo="${2:-}"; shift 2 ;;
+      --repo=*)    repo="${1#*=}"; shift ;;
+      --branch)    branch="${2:-}"; shift 2 ;;
+      --branch=*)  branch="${1#*=}"; shift ;;
+      --yes|-y)    assume_yes=1; shift ;;
+      *) die "未知参数：$1（可用 --repo / --branch / --yes）" ;;
+    esac
+  done
+  [ -n "$repo" ] || die "需要仓库地址： ./run.sh autoupdate adopt --repo https://github.com/hurss11/Collection-of-Time.git"
+  require_python
+
+  banner
+  step "把当前目录接管成 git 检出"
+  info "  目录： $APP_DIR"
+  info "  远端： $repo（分支 $branch）"
+  info "  会做： git init → remote add → fetch → 只把**代码**换成远端版本"
+  info "  不动： data/   assets/ 里的上传内容   admin.config.json   bin/   .run/"
+  if [ "$assume_yes" -eq 0 ]; then
+    printf '继续？[y/N] '
+    local answer=""
+    read -r answer
+    case "$answer" in y|Y|yes|YES) ;; *) info "已取消"; return 0 ;; esac
+  fi
+
+  local result="" rc=0
+  result="$(au adopt --url "$repo" --branch "$branch" 2>"$RUN_DIR/autoupdate.err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err "接管失败：$(json_get "$result" reason)"
+    [ -s "$RUN_DIR/autoupdate.err" ] && sed 's/^/  /' "$RUN_DIR/autoupdate.err" >&2
+    return 1
+  fi
+  ok "$(json_get "$result" reason)"
+  info "  作者白名单： $(json_get "$result" authors)"
+  if [ "$(json_get "$result" changed)" != "[]" ] && [ "$(json_get "$result" changed)" != "" ]; then
+    info "  代码对齐时改动了： $(json_get "$result" changed)"
+    if service_running; then
+      step "代码换过版本了，重启一次让新代码生效"
+      restart_service || warn "重启失败，请手工检查"
+      if wait_health "http://127.0.0.1:$(service_port)/api/health" 40; then
+        ok "服务已恢复正常"
+      else
+        err "服务没起来，看日志： ./run.sh logs 80"
+        return 1
+      fi
+    fi
+  fi
+  info ""
+  info "接下来： sudo ./run.sh autoupdate on    # 打开定时自动更新"
+}
+
+autoupdate() {
+  local action="${1:-status}"
+  shift || true
+  case "$action" in
+    on|enable|install)   autoupdate_on "$@" ;;
+    off|disable|remove)  autoupdate_off "$@" ;;
+    status|show|"")      autoupdate_status ;;
+    adopt|takeover)      autoupdate_adopt "$@" ;;
+    *) err "未知参数：$action（可用 on / off / status / adopt）"; exit 2 ;;
+  esac
 }
 
 # ---------- HTTPS 反向代理（明文 HTTP 会让会话 Cookie 丢掉 Secure） ----------
@@ -1098,8 +1475,23 @@ Photography 一键运行脚本
   ./run.sh create-user     创建管理员账号
   ./run.sh reset-password  重置管理员密码
   ./run.sh systemd         [--install] 生成/安装 systemd 常驻服务
+  ./run.sh update          [--force] [--quiet] [--accept-authors]
+                           立即拉取新代码并重启（失败自动回滚）
+  ./run.sh autoupdate      on|off|status|adopt 定时自动更新（systemd timer）
   ./run.sh https           [--domain D] 配 HTTPS 反代 + 签发证书 + 线上自检
   ./run.sh help            显示本帮助
+
+自动更新（./run.sh update / autoupdate）：
+  ./run.sh update                     拉取 origin/main，只换代码，重启并健康检查
+  ./run.sh update --force             正在上传也重启 / 允许覆盖本地改过的代码
+  ./run.sh update --accept-authors    这次提交的作者不在白名单里时，显式放行并记住
+  sudo ./run.sh autoupdate on         装 systemd timer，每 5 分钟自动检查一次
+  sudo ./run.sh autoupdate on --interval 15min
+  sudo ./run.sh autoupdate off        关掉自动更新（代码与数据都不动）
+  ./run.sh autoupdate status          看当前落后几个提交、定时器状态
+  ./run.sh autoupdate adopt --repo URL
+                                      把迁移包部署的目录就地接管成 git 检出
+                                      （不覆盖 data/、assets/、admin.config.json）
 
 可选参数（start / restart）：
   --port 9000 --host 0.0.0.0 --session-hours 8 --foreground
@@ -1143,6 +1535,8 @@ main() {
     create-user)    create_user "$@" ;;
     reset-password) reset_password "$@" ;;
     systemd)        systemd "$@" ;;
+    update|upgrade) update "$@" ;;
+    autoupdate|auto-update) autoupdate "$@" ;;
     https|https-proxy|ssl) https "$@" ;;
     help|-h|--help) usage ;;
     *)              err "未知命令：$command"; info ""; usage; exit 2 ;;

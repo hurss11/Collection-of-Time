@@ -52,6 +52,8 @@ chmod +x run.sh          # 首次
 | `./run.sh install-ffmpeg` | 下载 FFmpeg 静态构建到 `bin/`（可透传 `--check` / `--file` / `--url` 等） |
 | `./run.sh create-user` / `reset-password` | 创建管理员 / 重置密码 |
 | `./run.sh systemd [--install]` | 生成 systemd 单元（加 `--install` 需 root，直接写入并启用） |
+| `./run.sh update` | 拉取新代码并重启：只换代码、不碰数据，重启后健康检查，失败自动回滚 |
+| `./run.sh autoupdate on\|off\|status\|adopt` | 定时自动更新（systemd timer / cron），详见 [DEPLOY.md「自动热更新」](./DEPLOY.md) |
 
 启动参数可覆盖默认值（也支持环境变量）：
 
@@ -455,6 +457,11 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 
 > 从零部署建议走「`./run.sh package` 打包 → 上传 → 解压 → `./run.sh setup`」这条路，
 > 步骤见上一节与包内 `DEPLOY.md`。下面是几种运行方式的对照。
+>
+> 想要「本地 `git push` 之后服务器自动换代码」，把部署目录接管成 git 检出再开定时器：
+> `./run.sh autoupdate adopt --repo <仓库地址>` + `sudo ./run.sh autoupdate on`，
+> 细节与安全边界见 [DEPLOY.md「自动热更新」](./DEPLOY.md)（更新只替换代码路径，
+> `data/`、`assets/` 里的上传内容与 `admin.config.json` 一概不动）。
 
 **方式一：SSH 端口转发（推荐，最省事也最安全）**
 
@@ -559,6 +566,7 @@ Photography/
 │   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
 │   ├── exifread.py           # 标准库图片 EXIF 解析（JPEG / TIFF / PNG / WebP）
 │   ├── videometa.py          # 标准库视频容器解析（MP4/MOV、MKV/WebM、AVI 的时长/分辨率/帧率/编码/设备）
+│   ├── autoupdate.py         # 自动热更新：只换代码路径、只快进、作者白名单、可回滚
 │   └── media.py              # ffmpeg / ffprobe 封装与多位置探测（可选）
 ├── admin/                    # 后台前端（薄客户端：只渲染）
 │   ├── index.html            # 登录视图 + 后台视图
@@ -586,7 +594,7 @@ Photography/
 │   ├── js/                   # 作品集前端：取数、渲染、灯箱（薄客户端）
 │   ├── img/                  # 照片资源（当前为 SVG 占位图）
 │   └── video/                # 视频资源，详见 assets/video/README.md
-├── .run/                     # 运行状态：admin.pid、admin.log（已 gitignore）
+├── .run/                     # 运行状态：admin.pid、admin.log、更新状态（已 gitignore）
 ├── dist/                     # 打包产物 photography-<平台>-<时间>.tar.gz（已 gitignore）
 └── .gitignore
 ```
@@ -771,6 +779,9 @@ graph TD
   时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间（MP4 / MOV / MKV / WebM / AVI，**不需要 ffprobe**）。
 - **FFmpeg 集成**：三级查找（环境变量 / 项目 `bin/` / 系统 PATH），一条命令装静态构建并随项目打包。
 - **一键运行**：`run.sh` 把自检、装依赖、打包、建号、启动、看日志、装 systemd 收在一起。
+- **自动热更新**：`./run.sh update` 拉取代码并重启（只换代码路径、只快进、作者白名单、
+  上传中推迟、健康检查失败自动回滚）；`sudo ./run.sh autoupdate on` 装成定时器，
+  本地 `git push` 后服务器自己生效。
 - **打包迁移**：`./run.sh package` 生成自包含的 tar.gz（含 FFmpeg），解压即可在服务器上运行。
 
 ---
