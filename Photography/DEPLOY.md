@@ -211,6 +211,137 @@ python tools/check_https.py https://photos.example.com
 
 自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。
 
+### 5.3 加固上线：照着做（含每步验证）
+
+> 场景：服务已经在对公网跑（例如 `http://<公网IP>:8080/`），现在要收口成
+> 「只有 80/443 对外、全站 HTTPS、静态交给 nginx」。全程约 15 分钟，建议先开一个
+> 备用 SSH 会话，改到一半卡住时方便回滚。
+>
+> 下文 `<IP>` 换成你的公网 IP，`photos.example.com` 换成实际域名。
+
+**第 0 步 · 备份 + 记下现状**（可回滚的前提）
+
+```bash
+cd /opt/photography-XXXX          # 解压后的项目目录
+cp -a data /root/photography-data-backup-$(date +%F)      # 数据
+cp -a admin.config.json /root/                             # 账号与会话密钥
+ss -ltnp | grep -E ':(80|443|8080)\b'                      # 记下现在谁在监听
+curl -sI http://127.0.0.1:8080/ | head -3                  # 记下当前版本行为
+```
+
+验证：上面两条命令都有输出，备份目录里能看到 `albums.json photos.json videos.json`。
+
+**第 1 步 · 部署新构建**（旧构建仍把所有静态资源设成 `no-store`）
+
+```bash
+git pull                                  # 或上传并解压新的迁移包
+./run.sh doctor                           # 环境自检：Python / FFmpeg / 权限 / 端口
+```
+
+验证：
+
+```bash
+curl -sI http://127.0.0.1:8080/assets/css/main.css | grep -i cache-control
+```
+
+预期：`Cache-Control: public, no-cache`。若还是 `no-store, must-revalidate`，说明跑的是旧代码。
+
+**第 2 步 · 让后端只监听本机**（公网 8080 的口子先关掉）
+
+```bash
+./run.sh restart --host 127.0.0.1
+ss -ltnp | grep 8080                      # 应显示 127.0.0.1:8080，而不是 0.0.0.0:8080
+```
+
+验证（**从你自己的电脑**，不是服务器上）：
+
+```bash
+curl -m 5 -v http://<IP>:8080/            # 预期：连接超时 / 拒绝
+```
+
+还要在云厂商控制台把**安全组**里的 8080 入方向规则删掉（阿里云/腾讯云默认放行什么就删什么），
+只保留 80、443 与你的 SSH 端口。
+
+**第 3 步 · 装 nginx 与 certbot，一条命令配好 HTTPS**
+
+```bash
+sudo apt-get update && sudo apt-get install -y nginx certbot
+sudo ./run.sh https --domain photos.example.com --email you@example.com --dry-run   # 先看要做什么
+sudo ./run.sh https --domain photos.example.com --email you@example.com             # 真跑
+```
+
+脚本会：装「只有 80 端口」的配置 → `certbot` 用 webroot 签发 → 换成「80 跳转 + 443 反代」
+（带 `X-Forwarded-Proto` / `X-Forwarded-For` / gzip / 512MB 上传上限 / 源码 404 兜底）。
+`nginx -t` 不过就自动回滚，不 reload。
+
+验证（脚本最后会自动跑一次，也可以单独再跑）：
+
+```bash
+./run.sh https --check-only --domain photos.example.com
+```
+
+预期：`失败 0 项`（HTTPS 刚配好时 `HSTS`/`跳转` 那两项此时也应为通过）。
+
+**第 4 步 · 并发：静态交给 nginx**（>50 人同时浏览时才会明显）
+
+这两件事要**一起做**——只让后端 `--no-static`、却没让 nginx 接管 `/` 与 `/assets/`，
+前台会直接 404。
+
+```bash
+./run.sh restart --host 127.0.0.1 --no-static     # 后端只跑 API 与 /admin/
+sudo nano /etc/nginx/sites-available/photography.conf   # 取消 location / 与 location /assets/ 两段的注释
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+（RHEL / CentOS 是 `/etc/nginx/conf.d/photography.conf`。）
+
+验证：
+
+```bash
+curl -sI https://photos.example.com/assets/css/main.css | grep -iE 'server|cache-control|etag'
+curl -sI https://photos.example.com/ | grep -i server
+curl -s  https://photos.example.com/api/public/site | head -c 60       # API 仍有数据
+curl -sI https://photos.example.com/admin/ | grep -i server            # 后台仍由后端提供
+```
+
+预期：`/` 与 `/assets/**` 由 nginx 直接回（`Server: nginx/...`，带 `ETag`，
+`Cache-Control: no-cache`）；`/api/**` 与 `/admin/` 仍是后端在回。想看极限值可以用
+`ab` 或 `hey` 压同一个 URL，对比第 4 步前后。
+
+**第 5 步 · 确认限流用的是真实访客 IP**
+
+```bash
+journalctl -u photography-admin -n 20 --no-pager | tail -5
+```
+
+用浏览器故意输错密码 5 次，再看日志与响应：
+
+- 日志里应显示**你自己的公网 IP**（不是 `127.0.0.1`，也不是别人被连坐）；
+- 第 5 次返回 `429`，并提示还需等待多少秒。
+
+> 这条在反代下最关键：旧版本会把所有人算成同一个 IP，一个攻击者试错 5 次就能把管理员锁在门外。
+> 现在只有「对端是本机/内网」时才采信 `X-Forwarded-For`，公网直连伪造该头无效。
+
+**第 6 步 · 收尾自检**（对着 5.2 的清单逐条勾）
+
+```bash
+./run.sh https --check-only --domain photos.example.com --username admin --password '你的密码'
+```
+
+预期：`失败 0 项`，其中「登录并检查会话 Cookie」应显示 `Secure=True HttpOnly=True SameSite=Strict`。
+最后把该 IP 的锁定等 5 分钟自动解除（上一步的试错会锁 300 秒）。
+
+**出问题怎么回滚**
+
+```bash
+ls /etc/nginx/sites-available/photography.conf.bak.*      # 脚本每次改配置前的备份
+sudo cp /etc/nginx/sites-available/photography.conf.bak.<时间戳> /etc/nginx/sites-available/photography.conf
+sudo nginx -t && sudo systemctl reload nginx
+./run.sh restart --host 127.0.0.1                         # 若第 4 步把 --no-static 也加上了，去掉它
+sudo systemctl stop nginx                                 # 临时完全退回「直连后端」
+./run.sh restart --host 0.0.0.0                           # 并从云安全组临时放行 8080（记得改完再关）
+```
+
 > **注意**：作品集前台的搜索 / 筛选 / 排序与 EXIF 解析现在都由后端提供
 > （`/api/public/*`），上面的 `location /api/` 规则已经把它们一并代理过去。
 > 如果只把静态目录裸露出去（不经后端），前台会拿不到数据——

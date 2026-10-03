@@ -178,6 +178,7 @@ install_ffmpeg() {
 start() {
   local port="${PORT:-8080}" host="${HOST:-127.0.0.1}" hours="${SESSION_HOURS:-12}"
   local foreground=0
+  local args=(--no-browser)
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -187,10 +188,14 @@ start() {
       --host=*) host="${1#*=}"; shift ;;
       --session-hours) hours="${2:-}"; shift 2 ;;
       --session-hours=*) hours="${1#*=}"; shift ;;
+      --no-static) args+=(--no-static); shift ;;          # 静态交给 nginx，后端只跑 API
+      --secure-cookie) args+=(--secure-cookie); shift ;;  # 强制给 Cookie 加 Secure
       --foreground|-f) foreground=1; shift ;;
       *) die "未知参数：$1（用 ./run.sh help 查看用法）" ;;
     esac
   done
+
+  args+=(--host "$host" --port "$port" --session-hours "$hours")
 
   require_python
   banner
@@ -229,12 +234,11 @@ start() {
 
   if [ "$foreground" -eq 1 ]; then
     step "前台启动（Ctrl+C 停止）"
-    exec py admin.py --host "$host" --port "$port" --session-hours "$hours" --no-browser
+    exec py admin.py "${args[@]}"
   fi
 
   step "启动服务：$host:$port"
-  nohup "$PY_BIN" "$APP_DIR/admin.py" --host "$host" --port "$port" --session-hours "$hours" --no-browser \
-    >>"$LOG_FILE" 2>&1 &
+  nohup "$PY_BIN" "$APP_DIR/admin.py" "${args[@]}" >>"$LOG_FILE" 2>&1 &
   START_PID=$!
   printf '%s' "$START_PID" >"$PID_FILE"
 
@@ -1086,6 +1090,8 @@ Photography 一键运行脚本
 
 可选参数（start / restart）：
   --port 9000 --host 0.0.0.0 --session-hours 8 --foreground
+  --no-static           不提供静态文件，只跑 API（静态交给 nginx 反代时用）
+  --secure-cookie       强制给会话 Cookie 加 Secure（HTTPS 反代下会自动识别）
 
 打包参数（package）：
   --platform linux-x64     目标平台，默认 linux-x64
