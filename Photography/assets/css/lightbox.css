@@ -109,6 +109,38 @@
 
 .lightbox__stage.is-video .lightbox__video { max-width: calc(100% - var(--lb-gutter) * 2); }
 
+/* ---------- 缩放 / 平移 ---------- */
+
+/* 缩放靠 transform（由 lightbox.js 通过 style.transform 写入，CSP 不拦 CSSOM），
+   围绕自身中心缩放，裁切交给 .lightbox__viewport 的 overflow: hidden。 */
+.lightbox__image,
+.lightbox__video {
+  transform-origin: center center;
+  transition: transform 0.18s var(--ease);
+  user-select: none;
+  -webkit-user-drag: none;
+  touch-action: inherit;
+}
+
+/* 拖动 / 滚轮 / 双指缩放时不要过渡，否则手感发飘 */
+.lightbox__stage.is-panning .lightbox__image,
+.lightbox__stage.is-panning .lightbox__video { transition: none; }
+
+/* 照片没有别的触摸手势，直接接管（不然手机上双指会缩放整个页面） */
+.lightbox__stage:not(.is-video) .lightbox__viewport { touch-action: none; }
+
+/* 视频：禁止双指缩放页面（避免误触整页放大），但保留单指手势给原生控件 */
+.lightbox__video { touch-action: pan-x pan-y; }
+
+/* 放大后提示可平移 */
+.lightbox__stage.is-zoomed .lightbox__viewport { cursor: grab; }
+.lightbox__stage.is-panning .lightbox__viewport { cursor: grabbing; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lightbox__image,
+  .lightbox__video { transition: none; }
+}
+
 .lightbox__caption {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
@@ -231,15 +263,121 @@
 
 .lightbox__nav:hover { transform: translateY(-50%) scale(1.04); }
 
-.lightbox__counter {
+/* 底部一条：计数 + 缩放控件（两者居中并排） */
+.lightbox__foot {
   position: relative;
   z-index: 1;
-  margin: 10px 0 0;
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 16px;
+}
+
+.lightbox__counter {
+  margin: 0;
   text-align: center;
   font-size: 12px;
   letter-spacing: 0.16em;
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 缩放控件 ---------- */
+.lightbox__zoom {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+}
+
+.lightbox__zoom-btn {
+  display: grid;
+  place-items: center;
+  min-width: 34px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.18s var(--ease), color 0.18s var(--ease);
+}
+
+.lightbox__zoom-btn:hover { background: var(--bg-soft); color: var(--accent); }
+.lightbox__zoom-btn[disabled] { opacity: 0.35; cursor: default; }
+.lightbox__zoom-btn[disabled]:hover { background: transparent; color: var(--text); }
+
+.lightbox__zoom-level {
+  min-width: 62px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 放大状态的播放条 ---------- */
+
+/* 视频被放大后，浏览器原生控件条会一起被放大 / 移出可视区（点击映射也会失真），
+   所以放大态改用这条独立控制条接管播放：它不参与缩放，永远贴在视口底部。 */
+.lightbox__vbar {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 720px);
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  transform: translateX(-50%);
+}
+
+.lightbox__vbar-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lightbox__vbar-btn:hover { background: var(--bg-soft); color: var(--accent); }
+.lightbox__vbar-btn--text { font-size: 12px; color: var(--text-soft); }
+
+.lightbox__vbar-seek {
+  flex: 1 1 auto;
+  min-width: 70px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.lightbox__vbar-time {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 @media (max-width: 860px) {
@@ -294,5 +432,13 @@
 
   .ghost-btn { min-height: 44px; padding: 10px 18px; font-size: 13px; }
 
-  .lightbox__counter { display: block; margin-top: 6px; }
+  .lightbox__foot { margin-top: 6px; gap: 6px 12px; }
+  .lightbox__counter { display: block; }
+
+  .lightbox__zoom-btn { min-width: 44px; height: 44px; font-size: 17px; }
+  .lightbox__zoom-level { min-width: 72px; font-size: 12.5px; }
+
+  .lightbox__vbar { gap: 6px; padding: 5px 7px; }
+  .lightbox__vbar-btn { min-width: 44px; height: 44px; font-size: 16px; }
+  .lightbox__vbar-time { font-size: 11.5px; }
 }

@@ -6,7 +6,7 @@
  *   kind=video & isEmbed      → <iframe src="embedUrl">
  *   kind=video & 本地文件      → <video src="srcUrl" poster="imageUrl">
  *
- * 只做「打开 / 关闭 / 上下张 / 键盘 / 焦点 / 参数渲染」，不做任何解析与格式化。
+ * 只做「打开 / 关闭 / 上下张 / 键盘 / 焦点 / 缩放平移 / 参数渲染」，不做任何解析与格式化。
  */
 
 import { escapeHtml } from './data.js';
@@ -47,10 +47,32 @@ export function createLightbox(root) {
   const counterEl = root.querySelector('#lb-counter');
   const parseBtn = root.querySelector('#lb-exif-parse');
   const stageEl = root.querySelector('.lightbox__stage');
+  const viewportEl = root.querySelector('.lightbox__viewport');
+  const zoomEl = root.querySelector('#lb-zoom');
+  const zoomLevelBtn = root.querySelector('[data-lb-zoom-reset]');
+  const zoomOutBtn = root.querySelector('[data-lb-zoom-out]');
+  const zoomInBtn = root.querySelector('[data-lb-zoom-in]');
+  const vbarEl = root.querySelector('#lb-vbar');
+  const vseekEl = root.querySelector('#lb-vseek');
+  const vtimeEl = root.querySelector('#lb-vtime');
+  const vplayBtn = root.querySelector('[data-lb-vplay]');
+  const vfitBtn = root.querySelector('[data-lb-vfit]');
 
   /** @type {object[]} */ let items = [];
   let index = 0;
   let lastFocused = null;
+
+  /* ---------- 缩放状态（scale = 1 表示「适应窗口」） ---------- */
+  const MIN_SCALE = 0.25;
+  const MAX_SCALE = 8;
+  const ZOOM_STEP = 1.4;
+  const NATIVE_CONTROLS_PX = 48; // 视频底部原生控件条高度（元素坐标，会随缩放放大）
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
+  let suppressClick = false;
+  let wheelTimer = 0;
+  let seeking = false;
 
   const isOpen = () => !root.hidden;
   const current = () => items[index];
@@ -105,13 +127,175 @@ export function createLightbox(root) {
     );
   }
 
+  /* ---------- 缩放 / 平移 ---------- */
+
+  /** 当前可缩放的媒体；外链 iframe（跨域）不参与缩放 */
+  function activeMedia() {
+    if (!videoEl.hidden) return videoEl;
+    if (!imageEl.hidden) return imageEl;
+    return null;
+  }
+
+  /** 「适应窗口」相当于原始尺寸的多少倍；拿不到原始尺寸时返回 0 */
+  function fitScale() {
+    const el = activeMedia();
+    if (!el) return 0;
+    const natural = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
+    return natural > 0 && el.offsetWidth > 0 ? el.offsetWidth / natural : 0;
+  }
+
+  /** 平移量不超过「放大后溢出的部分」，媒体不会被拖出画面 */
+  function clampOffsets() {
+    const el = activeMedia();
+    if (!el) return;
+    const box = viewportEl.getBoundingClientRect();
+    const maxX = Math.max(0, (el.offsetWidth * scale - box.width) / 2);
+    const maxY = Math.max(0, (el.offsetHeight * scale - box.height) / 2);
+    tx = Math.min(maxX, Math.max(-maxX, tx));
+    ty = Math.min(maxY, Math.max(-maxY, ty));
+  }
+
+  function applyZoom() {
+    const el = activeMedia();
+    if (!el) return;
+    clampOffsets();
+    const idle = Math.abs(scale - 1) < 1e-3 && Math.abs(tx) < 0.5 && Math.abs(ty) < 0.5;
+    el.style.transform = idle
+      ? ''
+      : `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${scale.toFixed(4)})`;
+    stageEl.classList.toggle('is-zoomed', scale > 1.001);
+    syncPlaybackBar();
+    updateZoomLabel();
+  }
+
+  function updateZoomLabel() {
+    const fit = fitScale();
+    if (zoomLevelBtn) {
+      zoomLevelBtn.textContent =
+        Math.abs(scale - 1) < 1e-3
+          ? '适应'
+          : `${Math.round((fit > 0 ? fit * scale : scale) * 100)}%`;
+    }
+    if (zoomOutBtn) zoomOutBtn.disabled = scale <= MIN_SCALE + 1e-3;
+    if (zoomInBtn) zoomInBtn.disabled = scale >= MAX_SCALE - 1e-3;
+  }
+
+  /** 视频的原生控件条贴在画面底部：缩放以「画面底部中心」为不动点，
+      这样放大后进度条仍在可视区里（否则放大就等于把控件推出屏幕）。 */
+  function defaultAnchor() {
+    if (videoEl.hidden) return null;
+    const rect = videoEl.getBoundingClientRect();
+    const box = viewportEl.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: rect.bottom };
+  }
+
+  /** 以 anchor（客户端坐标）为不动点缩放；照片默认以画面中心为不动点 */
+  function setZoom(next, anchor) {
+    if (!activeMedia()) return;
+    const target = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
+    if (Math.abs(target - scale) < 1e-6) return;
+
+    const box = viewportEl.getBoundingClientRect();
+    const point = anchor ?? defaultAnchor() ?? { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    const ax = point.x - (box.left + box.width / 2);
+    const ay = point.y - (box.top + box.height / 2);
+    const k = target / scale;
+    tx = ax - k * (ax - tx);
+    ty = ay - k * (ay - ty);
+    scale = target;
+    applyZoom();
+  }
+
+  function resetZoom() {
+    scale = 1;
+    tx = 0;
+    ty = 0;
+    suppressClick = false;
+    imageEl.style.transform = '';
+    videoEl.style.transform = '';
+    stageEl.classList.remove('is-zoomed', 'is-panning');
+    if (vbarEl) vbarEl.hidden = true;
+    videoEl.controls = true;
+    updateZoomLabel();
+  }
+
+  /** 适应窗口 ⇄ 原始像素 1:1；原始尺寸拿不到时退化成 2 倍 */
+  function toggleZoom() {
+    if (Math.abs(scale - 1) > 1e-3) {
+      resetZoom();
+      return;
+    }
+    const fit = fitScale();
+    setZoom(fit > 0 && fit < 0.999 ? 1 / fit : 2);
+  }
+
+  /** 缩放控件只在照片 / 本地视频时显示 */
+  function syncZoomUI() {
+    if (!zoomEl) return;
+    zoomEl.hidden = !activeMedia();
+    updateZoomLabel();
+  }
+
+  /** 视频底部是浏览器原生控件条，那里的指针事件留给播放器 */
+  function onNativeControls(event) {
+    if (videoEl.hidden) return false;
+    const rect = videoEl.getBoundingClientRect();
+    return event.clientY > rect.bottom - NATIVE_CONTROLS_PX * scale;
+  }
+
+  /* ---------- 放大态的播放条 ---------- */
+
+  /** 秒 → m:ss（超过一小时补小时） */
+  function clockText(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+    const total = Math.floor(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const mm = h ? String(m).padStart(2, '0') : String(m);
+    return h ? `${h}:${mm}:${String(s).padStart(2, '0')}` : `${mm}:${String(s).padStart(2, '0')}`;
+  }
+
+  const videoDuration = () => (Number.isFinite(videoEl.duration) ? videoEl.duration : 0);
+
+  function syncVBar() {
+    if (!vbarEl || vbarEl.hidden) return;
+    const duration = videoDuration();
+    if (!seeking && vseekEl) {
+      vseekEl.value = duration ? String(Math.round((videoEl.currentTime / duration) * 1000)) : '0';
+    }
+    if (vtimeEl) {
+      vtimeEl.textContent = `${clockText(videoEl.currentTime)} / ${clockText(duration)}`;
+    }
+  }
+
+  function syncPlayButton() {
+    if (!vplayBtn) return;
+    vplayBtn.textContent = videoEl.paused ? '▶' : '▮▮';
+    vplayBtn.setAttribute('aria-label', videoEl.paused ? '播放' : '暂停');
+  }
+
+  /** 视频放大后原生控件条会被放大 / 推出可视区，改用独立控制条 */
+  function syncPlaybackBar() {
+    if (!vbarEl) return;
+    const zoomed = scale > 1.001 && !videoEl.hidden;
+    vbarEl.hidden = !zoomed;
+    if (!videoEl.hidden) videoEl.controls = !zoomed;
+    if (zoomed) {
+      syncVBar();
+      syncPlayButton();
+    }
+  }
+
   function render() {
     const item = current();
     if (!item) return;
 
     setStatus('');
     resetMedia();
+    resetZoom();
     showMedia(item);
+    syncZoomUI();
 
     titleEl.textContent = item.title || '';
     subtitleEl.textContent = item.subtitle || '';
@@ -155,6 +339,7 @@ export function createLightbox(root) {
   function close() {
     if (!isOpen()) return;
     resetMedia();
+    resetZoom();
     root.hidden = true;
     document.body.style.overflow = '';
     imageEl.removeAttribute('src');
@@ -177,8 +362,13 @@ export function createLightbox(root) {
   });
 
   // 点击图片左右两侧区域翻页（视频区域留给播放器自身交互）
-  root.querySelector('.lightbox__viewport')?.addEventListener('click', (event) => {
+  viewportEl?.addEventListener('click', (event) => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
     if (current()?.kind === VIDEO) return;
+    if (scale > 1.001) return; // 放大后左右两区留给平移，翻页交给箭头 / 键盘
     if (event.target !== imageEl) return;
 
     const rect = event.currentTarget.getBoundingClientRect();
@@ -223,12 +413,205 @@ export function createLightbox(root) {
     const actions = {
       ArrowLeft: () => go(-1),
       ArrowRight: () => go(1),
+      '+': () => setZoom(scale * ZOOM_STEP),
+      '=': () => setZoom(scale * ZOOM_STEP),
+      '-': () => setZoom(scale / ZOOM_STEP),
+      _: () => setZoom(scale / ZOOM_STEP),
+      '0': () => resetZoom(),
     };
     const action = actions[event.key];
     if (action) {
       event.preventDefault();
       action();
     }
+  });
+
+  /* ---------- 缩放交互：按钮 / 滚轮 / 双击 / 拖拽 / 双指 ---------- */
+
+  const pointers = new Map();
+  let panStart = null; // { x, y, tx, ty }
+  let pinchPrev = null; // { dist, mid }
+  let dragDistance = 0;
+  let pinched = false;
+
+  /**
+   * 只在「真的开始拖动」时才捕获指针：capture 会把后续的 click / dblclick
+   * 一并重定向到容器，普通单击（点两侧翻页、双击缩放）就收不到正确 target 了。
+   */
+  function capturePointer(id) {
+    try {
+      viewportEl.setPointerCapture(id);
+    } catch {
+      /* 指针已经释放，忽略 */
+    }
+  }
+
+  /** 手势进行中先关掉 transition，否则拖拽会「发飘」 */
+  function markGesture() {
+    stageEl.classList.add('is-panning');
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(() => {
+      wheelTimer = 0;
+      if (!pointers.size) stageEl.classList.remove('is-panning');
+    }, 160);
+  }
+
+  zoomInBtn?.addEventListener('click', () => setZoom(scale * ZOOM_STEP));
+  zoomOutBtn?.addEventListener('click', () => setZoom(scale / ZOOM_STEP));
+  zoomLevelBtn?.addEventListener('click', () => toggleZoom());
+
+  // 放大态播放条
+  vplayBtn?.addEventListener('click', () => {
+    if (videoEl.paused) videoEl.play();
+    else videoEl.pause();
+  });
+  vfitBtn?.addEventListener('click', () => resetZoom());
+  vseekEl?.addEventListener('pointerdown', () => {
+    seeking = true;
+  });
+  vseekEl?.addEventListener('input', () => {
+    const duration = videoDuration();
+    if (duration) videoEl.currentTime = (Number(vseekEl.value) / 1000) * duration;
+  });
+  vseekEl?.addEventListener('change', () => {
+    seeking = false;
+  });
+  videoEl.addEventListener('timeupdate', syncVBar);
+  videoEl.addEventListener('durationchange', syncVBar);
+  videoEl.addEventListener('play', syncPlayButton);
+  videoEl.addEventListener('pause', syncPlayButton);
+
+  viewportEl?.addEventListener('dblclick', (event) => {
+    if (!activeMedia()) return;
+    if (event.target !== imageEl && event.target !== videoEl) return;
+    if (onNativeControls(event)) return;
+    toggleZoom();
+  });
+
+  viewportEl?.addEventListener(
+    'wheel',
+    (event) => {
+      if (!activeMedia()) return;
+      event.preventDefault();
+      markGesture();
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      // 照片以光标为不动点；视频用默认锚点（底部中心），保住原生控件条
+      const anchor = videoEl.hidden ? { x: event.clientX, y: event.clientY } : null;
+      setZoom(scale * Math.pow(1.0015, -delta), anchor);
+    },
+    { passive: false },
+  );
+
+  viewportEl?.addEventListener('pointerdown', (event) => {
+    if (!activeMedia()) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    if (event.target.closest?.('.lightbox__vbar')) return; // 播放条自己处理
+    if (onNativeControls(event)) return; // 让原生控件条先拿到事件
+
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.size === 1) {
+      panStart = { x: event.clientX, y: event.clientY, tx, ty };
+      pinchPrev = null;
+      dragDistance = 0;
+    } else {
+      panStart = null;
+      pinchPrev = null;
+      pinched = true;
+    }
+  });
+
+  /** 双指：按指距缩放，并让双指中点跟着走 */
+  function pinchMove() {
+    const [a, b] = [...pointers.values()];
+    if (!a || !b) return;
+
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    if (!pinchPrev || pinchPrev.dist < 8 || dist < 8) {
+      pinchPrev = { dist, mid };
+      return;
+    }
+
+    const box = viewportEl.getBoundingClientRect();
+    const target = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * (dist / pinchPrev.dist)));
+    const k = target / scale; // 实际生效的倍数（可能被上限截断）
+    const ax = mid.x - (box.left + box.width / 2);
+    const ay = mid.y - (box.top + box.height / 2);
+
+    tx = ax - k * (pinchPrev.mid.x - (box.left + box.width / 2) - tx);
+    ty = ay - k * (pinchPrev.mid.y - (box.top + box.height / 2) - ty);
+    scale = target;
+    [...pointers.keys()].forEach(capturePointer);
+    markGesture();
+    applyZoom();
+    pinchPrev = { dist, mid };
+  }
+
+  viewportEl?.addEventListener('pointermove', (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.size >= 2) {
+      pinchMove();
+      return;
+    }
+    if (!panStart || scale <= 1.001) return; // 没放大就不拖，免得抢掉「点两侧翻页」
+
+    const dx = event.clientX - panStart.x;
+    const dy = event.clientY - panStart.y;
+    dragDistance = Math.max(dragDistance, Math.hypot(dx, dy));
+    if (dragDistance > 2) markGesture();
+    if (dragDistance > 4) capturePointer(event.pointerId);
+    tx = panStart.tx + dx;
+    ty = panStart.ty + dy;
+    applyZoom();
+  });
+
+  function endPointer(event) {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.delete(event.pointerId);
+    if (viewportEl.hasPointerCapture?.(event.pointerId)) {
+      viewportEl.releasePointerCapture(event.pointerId);
+    }
+    pinchPrev = null;
+
+    if (pointers.size === 1) {
+      const [rest] = [...pointers.values()];
+      panStart = { x: rest.x, y: rest.y, tx, ty };
+      dragDistance = 0;
+      return;
+    }
+    if (pointers.size > 1) return;
+
+    panStart = null;
+    if (!wheelTimer) stageEl.classList.remove('is-panning');
+    if (dragDistance > 4 || pinched) {
+      // 拖完 / 捏完的那一下不应该被当成「点两侧翻页」
+      suppressClick = true;
+      setTimeout(() => {
+        suppressClick = false;
+      }, 0);
+    }
+    dragDistance = 0;
+    pinched = false;
+  }
+
+  viewportEl?.addEventListener('pointerup', endPointer);
+  viewportEl?.addEventListener('pointercancel', endPointer);
+
+  // 图片 / 视频的原始尺寸是异步才知道的，知道了就刷新百分比
+  imageEl.addEventListener('load', updateZoomLabel);
+  videoEl.addEventListener('loadedmetadata', () => {
+    updateZoomLabel();
+    syncVBar();
+    syncPlayButton();
+  });
+
+  window.addEventListener('resize', () => {
+    if (!isOpen()) return;
+    if (scale > 1.001) applyZoom();
+    else updateZoomLabel();
   });
 
   // 简单焦点陷阱：Tab 在灯箱内部循环

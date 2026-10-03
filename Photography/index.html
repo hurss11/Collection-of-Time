@@ -127,11 +127,19 @@
 
     <figure class="lightbox__stage">
       <div class="lightbox__viewport">
-        <img class="lightbox__image" id="lb-image" alt="" />
+        <img class="lightbox__image" id="lb-image" alt="" draggable="false" />
         <video class="lightbox__video" id="lb-video" controls playsinline preload="metadata" hidden></video>
         <iframe class="lightbox__embed" id="lb-embed" title="外链视频播放器"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
                 allowfullscreen referrerpolicy="origin" hidden></iframe>
+        <div class="lightbox__vbar" id="lb-vbar" hidden>
+          <button class="lightbox__vbar-btn" type="button" data-lb-vplay aria-label="播放">▶</button>
+          <input class="lightbox__vbar-seek" id="lb-vseek" type="range" min="0" max="1000" step="1" value="0"
+                 aria-label="播放进度">
+          <span class="lightbox__vbar-time" id="lb-vtime">0:00 / 0:00</span>
+          <button class="lightbox__vbar-btn lightbox__vbar-btn--text" type="button" data-lb-vfit
+                  aria-label="还原到适应窗口">适应</button>
+        </div>
       </div>
       <figcaption class="lightbox__caption">
         <div class="lightbox__headline">
@@ -148,7 +156,17 @@
       </figcaption>
     </figure>
 
-    <p class="lightbox__counter" id="lb-counter"></p>
+    <div class="lightbox__foot">
+      <p class="lightbox__counter" id="lb-counter"></p>
+      <div class="lightbox__zoom" id="lb-zoom" role="group" aria-label="缩放" hidden>
+        <button class="lightbox__zoom-btn" type="button" data-lb-zoom-out
+                aria-label="缩小（-）" title="缩小（-）">−</button>
+        <button class="lightbox__zoom-btn lightbox__zoom-level" type="button" data-lb-zoom-reset
+                aria-label="适应窗口 / 原始尺寸" title="适应窗口 ⇄ 原始尺寸（0）">适应</button>
+        <button class="lightbox__zoom-btn" type="button" data-lb-zoom-in
+                aria-label="放大（+）" title="放大（+）">+</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="assets/js/app.js"></script>
