@@ -219,6 +219,13 @@ python tools/check_https.py https://photos.example.com
       `Last-Modified` / `ETag`（刷新应命中 304，而不是重下整包）
 - [ ] `/api/**` 回 `no-store`（接口响应不落缓存）
 - [ ] 连打 `/api/public/site` 60 次会出现 `429`（反代层限流生效）
+- [ ] 连打写接口（例如 `POST /api/items/photos`）20 次以上会出现 `429`，而同一时刻
+      连打 `GET /api/items/photos` 40 次**一个都不该**被限（写限流只按写方法计数）
+- [ ] 发一个超过 `client_max_body_size` 的请求体会在**边缘**收到 413，且响应体是
+      `{"ok":false,"error":…}` 这样的 JSON（把后端 `--no-auth` 日志或 nginx `access.log`
+      对照一下，超限请求不应出现在后端）
+- [ ] `/assets/js/app.js` 回 `Content-Encoding: gzip`（Python 3.12+ 下 `.js` 是
+      `text/javascript`，`gzip_types` 漏了它就等于没压缩）
 - [ ] `README.md` 里 `assets/video/*.mp4` 两个占位样片存在（示例卡片不会点开就报错）
 
 自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。

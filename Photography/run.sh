@@ -569,6 +569,7 @@ https_usage() {
   --email ADDR    证书到期通知邮箱；首次签发建议提供
   --port N        后端监听端口，默认 8080
   --name NAME     nginx 站点配置文件名，默认 photography
+  --body-limit MB nginx 的 client_max_body_size，默认与后端上限一致（520）
   --no-certbot    只装反代配置，不动证书（证书由你自己的流程签发）
   --check-only    只跑线上自检，不改任何配置
   --insecure      自检时跳过证书校验（自签证书 / 内网用）
@@ -653,6 +654,7 @@ install_nginx_conf() {
 https() {
   local domain="" email="" name="photography" port="${PORT:-8080}"
   local dry=0 no_certbot=0 check_only=0 insecure=0 static=0
+  local body_limit="${NGINX_BODY_LIMIT:-}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -660,6 +662,7 @@ https() {
       --email)      email="${2:-}"; shift 2 ;;
       --name)       name="${2:-}"; shift 2 ;;
       --port)       port="${2:-}"; shift 2 ;;
+      --body-limit) body_limit="${2:-}"; shift 2 ;;
       --no-certbot) no_certbot=1; shift ;;
       --check-only) check_only=1; shift ;;
       --insecure)   insecure=1; shift ;;
@@ -689,9 +692,11 @@ https() {
   local stage_http stage_full
   local static_flag=()
   [ "$static" = "1" ] && static_flag=(--nginx-static)
+  local body_flag=()
+  [ -n "$body_limit" ] && body_flag=(--nginx-body-limit "$body_limit")
 
-  stage_http="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" --http-only)" || return 1
-  stage_full="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" "${static_flag[@]+"${static_flag[@]}"}")" || return 1
+  stage_http="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" --http-only "${body_flag[@]+"${body_flag[@]}"}")" || return 1
+  stage_full="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" "${static_flag[@]+"${static_flag[@]}"}" "${body_flag[@]+"${body_flag[@]}"}")" || return 1
 
   if [ "$dry" = "1" ]; then
     step "1/4 预检（dry-run：不执行任何改动）"

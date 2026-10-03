@@ -1709,9 +1709,19 @@ WantedBy=multi-user.target
 """
 
 
+def nginx_body_limit_mb() -> int:
+    """nginx 的 `client_max_body_size`，与后端 MAX_BODY_BYTES 对齐（向上取整到 MB）。
+
+    两边必须一致：nginx 小了会在边缘误杀后端本来允许的合法上传；大了就等于少了
+    一道边缘防护（超限的请求会白跑到后端才被拒）。
+    """
+    return (MAX_BODY_BYTES + 1048575) // 1048576
+
+
 def nginx_config(domain: str, port: int, name: str = "photography",
                  upstream: str = "127.0.0.1", tls: bool = True,
-                 webroot: str = "/var/www/html", static: bool = False) -> str:
+                 webroot: str = "/var/www/html", static: bool = False,
+                 body_limit_mb: int | None = None) -> str:
     """生成 nginx 反向代理配置。
 
     tls=False 只输出 HTTP 段（申请证书前必须先有它，否则 443 段引用的
@@ -1724,19 +1734,29 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     否则浏览器会带着一个可在明文链路里被截获的 Cookie 访问 HTTPS 站点。
     """
     cert_dir = f"/etc/letsencrypt/live/{domain}"
+    body_limit = nginx_body_limit_mb() if body_limit_mb is None else int(body_limit_mb)
+    write_key = f"{name}_write_key"
 
     header = (
         f"# Collection of Time - {name} 反向代理\n"
         f"# 由 `python admin.py --print-nginx --domain {domain}` 生成，改动前请先备份。\n"
         f"# 安装：/etc/nginx/sites-available/{name}.conf → 软链到 sites-enabled/ → nginx -t → reload\n"
         f"#\n"
-        f"# 限流：公开只读接口与登录端点各一档（按访客 IP 计数）。\n"
-        f"# limit_req_zone 属于 http 上下文——站点文件本来就被 include 进 http 块，写在这里合法；\n"
+        f"# 限流：公开只读接口、登录端点、写接口各一档（按访客 IP 计数）。\n"
+        f"# limit_req_zone / map 属于 http 上下文——站点文件本来就被 include 进 http 块，写在这里合法；\n"
         f"# 名称带 {name}_ 前缀，避免和同服务器上别的站点撞车。\n"
         f"# 反代在本机时 $binary_remote_addr 就是真实访客 IP；若前面还有云负载均衡 / CDN，\n"
         f"# 需要配 ngx_http_realip_module（set_real_ip_from + real_ip_header）才能拿到真实 IP。\n"
+        f"map $request_method ${write_key} {{\n"
+        f"    default \"\";            # GET / HEAD / OPTIONS 的 key 为空，nginx 直接跳过限流\n"
+        f"    POST    $binary_remote_addr;\n"
+        f"    PUT     $binary_remote_addr;\n"
+        f"    PATCH   $binary_remote_addr;\n"
+        f"    DELETE  $binary_remote_addr;\n"
+        f"}}\n"
         f"limit_req_zone $binary_remote_addr zone={name}_public:10m rate=20r/s;\n"
         f"limit_req_zone $binary_remote_addr zone={name}_login:10m rate=1r/s;\n"
+        f"limit_req_zone ${write_key} zone={name}_write:10m rate=2r/s;\n"
         f"limit_req_status 429;\n"
     )
 
@@ -1811,19 +1831,29 @@ def nginx_config(domain: str, port: int, name: str = "photography",
 
     # 首屏基本是 JS / CSS / JSON，压缩后体积约为原来的三成
     # （text/html 不用写：nginx 打开 gzip 时本来就总是压缩它，重复写会告警）
+    # 注意 text/javascript：Python 3.12+ 起标准库把 .js 映射成它（RFC 9239），
+    # 只写 application/javascript 会导致前端 JS **一个都没被压缩**。
     gzip on;
     gzip_vary on;
     gzip_min_length 512;
     gzip_proxied any;
-    gzip_types text/plain text/css application/javascript application/json
-               application/xml image/svg+xml;
+    gzip_types text/plain text/css text/javascript application/javascript
+               application/json application/xml text/xml image/svg+xml;
 
-    # 上传 4K 视频可能几百 MB，别让 nginx 提前掐断
-    client_max_body_size 512m;
+    # 上传 4K 视频可能几百 MB；这个值与后端 MAX_BODY_BYTES 保持一致，
+    # 超限的请求在边缘就被 413 挡掉，不用白跑一趟后端
+    client_max_body_size {body_limit}m;
     proxy_request_buffering off;
     proxy_http_version 1.1;
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
+
+    # 边缘的 413 也回 JSON，前端才能显示成人话而不是「响应不是 JSON」
+    error_page 413 = @{name}_too_large;
+    location @{name}_too_large {{
+        default_type application/json;
+        return 413 '{{"ok":false,"error":"请求体超过反向代理上限（{body_limit}MB），请分批上传或提高 client_max_body_size"}}';
+    }}
 
     # 后端据此判断「本次请求走的是 HTTPS」，从而给会话 Cookie 加 Secure
     # （proxy_set_header 可以写在 server 段，proxy_pass 不行——它只能写在 location 里）
@@ -1839,6 +1869,10 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     }}
 
     location /api/ {{
+        # 写接口限流：POST/PUT/DELETE/PATCH 按 IP 计数（GET/HEAD 不计，
+        # 正常浏览完全不受影响）。后台一个界面的写操作远低于 2r/s + 突发 20，
+        # 但这一道能挡住「拿不到凭据也硬刷写接口」——每个写请求都要落盘 / 调 ffmpeg。
+        limit_req zone={name}_write burst=20 nodelay;
         proxy_pass http://{upstream}:{port};
     }}
 
@@ -2020,6 +2054,9 @@ def main() -> int:
                         help="只生成 HTTP 段（申请证书前用），配合 --print-nginx")
     parser.add_argument("--nginx-static", action="store_true",
                         help="生成的 nginx 配置里由 nginx 直接托管前台静态（后端需 --no-static）")
+    parser.add_argument("--nginx-body-limit", type=int, default=None, metavar="MB",
+                        help=f"nginx 的 client_max_body_size（MB），默认与后端上限一致"
+                             f"（{nginx_body_limit_mb()}MB）")
     parser.add_argument("--ffmpeg-status", action="store_true",
                         help="打印 FFmpeg 探测结果后退出")
     parser.add_argument("--fetch-ffmpeg", action="store_true",
@@ -2051,7 +2088,8 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         print(nginx_config(args.domain, args.port, name=args.nginx_name,
-                           tls=not args.http_only, static=args.nginx_static))
+                           tls=not args.http_only, static=args.nginx_static,
+                           body_limit_mb=args.nginx_body_limit))
         return 0
 
     external = args.host not in ("127.0.0.1", "localhost", "::1")

@@ -435,8 +435,12 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | --- | --- | --- |
 | `limit_req`（`/api/public/*`） | 20 次/秒，burst 40，429 | 挡刷公开接口；正常浏览首屏只 2 个请求 |
 | `limit_req`（`/api/auth/login`） | 1 次/秒，burst 5，429 | 与应用层的「5 次失败锁 5 分钟」互补，防撞库 |
-| `gzip` | JS/CSS/JSON/SVG | 首屏体积约为原来三成 |
-| `client_max_body_size` | 512m | 与后端上传上限对齐，避免大视频被截断 |
+| `limit_req`（写接口） | 2 次/秒，burst 20，429 | **只对 POST/PUT/PATCH/DELETE 计数**（`map $request_method`，GET/HEAD 的 key 为空 → nginx 跳过），所以读接口和正常浏览完全不受影响；但「拿不到凭据也硬刷写接口」会被挡住——每个写请求都要落盘 / 调 ffmpeg |
+| `client_max_body_size` | 与后端 `MAX_BODY_BYTES` 一致（520m，`--body-limit` / `NGINX_BODY_LIMIT` 可调） | 超限的请求在边缘就被 413 挡掉，不用白跑一趟后端；两边都从代码里推导，不会各自漂移 |
+| `error_page 413` | JSON | 边缘的 413 也回 `{"ok":false,"error":…}`，前端显示成人话而不是「响应不是 JSON」 |
+| `gzip` | JS/CSS/JSON/SVG/XML | 首屏体积约为原来三成。**`text/javascript` 必须写**：Python 3.12+ 起标准库把 `.js` 映射成它（RFC 9239），只写 `application/javascript` 会导致前端 JS 一个都不压缩 |
+| `proxy_request_buffering` | off | 上传体直接透传给后端（后端是流式落盘），少一次磁盘中转 |
+| `limit_conn` | 未开启 | 需要更严的并发准入时再加（注意 keep-alive 的空闲连接也会计入） |
 
 ### 服务器部署
 

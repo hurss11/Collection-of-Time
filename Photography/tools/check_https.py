@@ -302,7 +302,19 @@ def run_checks(args: argparse.Namespace) -> Reporter:
     api_cache = header_of(headers, "Cache-Control")
     report.add("no-store" in api_cache, "接口响应不缓存", f"Cache-Control: {api_cache or '(缺失)'}")
 
-    # 7. 可选：真的登录一次，看会话 Cookie 的 Secure
+    # 8. 反代层压缩：Python 3.12+ 里 .js 是 text/javascript，gzip_types 漏了它
+    #    就等于前端 JS 一个都没压缩（首屏体积差 3 倍，很容易漏过去）
+    status, headers, _ = fetch(base + "/assets/js/app.js",
+                               headers={"Accept-Encoding": "gzip"}, context=context)
+    if status == 404:
+        report.add(None, "静态资源压缩", "没找到 /assets/js/app.js，跳过")
+    else:
+        encoding = header_of(headers, "Content-Encoding").lower()
+        report.add(encoding in ("gzip", "br", "zstd", "deflate"), "静态资源压缩",
+                   f"JS 的 Content-Encoding: {encoding or '(无)'}"
+                   f"（反代 gzip_types 需要包含 text/javascript；CDN 的 br 也算通过）")
+
+    # 9. 可选：真的登录一次，看会话 Cookie 的 Secure
     if args.username:
         jar = {name: str(attrs["value"]) for name, attrs in cookies.items()}
         csrf = jar.get("cot_csrf", "")
