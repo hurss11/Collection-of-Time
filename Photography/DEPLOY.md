@@ -493,6 +493,8 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 站点资源 404 但后台能用 | 从**项目目录**里启动（`cd` 进项目再 `./run.sh start`） |
 | 服务被 OOM 杀掉 / 整机卡死 | 见下面「内存与 OOM」 |
 | 上传卡在 100% 不起作用 | 服务端在处理（读 EXIF / 生成缩略图与封面），大文件会花几秒；`journalctl -u photography-admin -f` 能看到耗时 |
+| 日志里成片的 400 / 414 / 505 | 扫描器发的畸形请求。现版本正常回 4xx 且只记一行访问日志；若仍伴随 traceback，说明代码是旧的（`grep -n def\ request_path admin.py` 无输出就该更新） |
+| 日志里 `GET /assets/... 404` | 上传途中有过一次服务重启，页面还引用着中断那次的旧文件名：强制刷新（手机端清站点数据）即可。先确认 `data/*.json` 里确实没有这条引用，再判断为前端残留 |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。
 

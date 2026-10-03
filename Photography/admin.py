@@ -228,7 +228,11 @@ class Handler(SimpleHTTPRequestHandler):
         对端是公网地址时不采信，避免伪造这个头绕过限流。
         """
         peer = (self.client_address[0] if self.client_address else "") or ""
-        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        # 扫描器爱发畸形请求行：parse_request 会在解析请求头**之前**就调 send_error，
+        # 而 send_error → log_message → 这里，此时 self.headers 还不存在。
+        # 直接取属性会让异常盖掉本该返回的 400/414（日志还被 traceback 刷屏）。
+        headers = getattr(self, "headers", None)
+        forwarded = ((headers.get("X-Forwarded-For") or "") if headers else "").split(",")[0].strip()
         if not forwarded or not _is_local_peer(peer):
             return peer
         try:
@@ -241,6 +245,15 @@ class Handler(SimpleHTTPRequestHandler):
         """日志与限流统一用真实客户端 IP。"""
         return self.client_ip()
 
+    def request_path(self) -> str:
+        """请求路径（未解析出来时为空串）。
+
+        与 `client_ip()` 同一个坑：畸形请求行会让 `parse_request` 在赋值 `self.path`
+        之前就走 `send_error`，而错误响应也要过 `end_headers()`（`cache_control()`、
+        `content_security_policy()` 都读路径）。这里兜底，让错误响应能正常发出去。
+        """
+        return getattr(self, "path", "") or ""
+
     def log_message(self, fmt: str, *args) -> None:            # noqa: A003
         sys.stderr.write("  %s - %s\n" % (self.address_string(), fmt % args))
 
@@ -252,7 +265,7 @@ class Handler(SimpleHTTPRequestHandler):
           刷新时省掉整包流量，同时改完立刻生效；
         - HTML 外壳：不缓存，升级后打开就是新页面。
         """
-        path = self.path.split("?", 1)[0]
+        path = self.request_path().split("?", 1)[0]
         if path.startswith("/api/"):
             return "no-store"
         if path.startswith(CACHE_REVALIDATE_PREFIXES) or path in CACHE_REVALIDATE_FILES:
@@ -288,7 +301,7 @@ class Handler(SimpleHTTPRequestHandler):
         origins = [origin for origin in (getattr(self.server, "allow_origins", []) or [])
                    if origin and origin != "*"]
 
-        if self.path.startswith("/admin"):
+        if self.request_path().startswith("/admin"):
             connect = " ".join(["'self'", *origins])
             return "; ".join([
                 "default-src 'self'",
