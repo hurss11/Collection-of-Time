@@ -402,6 +402,18 @@ python admin.py --host 0.0.0.0 --port 8080 --secure-cookie
 
 必须放在 HTTPS 反向代理之后，否则会话 Cookie 与密码会以明文传输：
 
+```bash
+# 一条命令配好：先装 80 端口配置 → certbot 签发 → 换完整配置 → 线上自检
+./run.sh https --domain photos.example.com --email you@example.com
+```
+
+它会打印并安装 nginx 配置、自动转发 `X-Forwarded-Proto`，最后用
+`python tools/check_https.py https://photos.example.com` 从外部验证
+「80 跳转、证书、安全响应头、Cookie 的 Secure/HttpOnly/SameSite、静态白名单」是否真的生效。
+不想让它动配置可以加 `--dry-run`（只打印步骤与配置内容）。
+
+手工配置时至少要保证这几项：
+
 ```nginx
 location /admin/ { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; }
 location /api/   { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; }
@@ -473,6 +485,7 @@ Photography/
 │       └── app.js            # 事件装配与取数调度
 ├── tools/
 │   ├── make_posters.py       # 用 ffmpeg 批量生成视频封面
+│   ├── check_https.py        # 线上自检：反代头、Secure Cookie、白名单
 │   └── fetch_ffmpeg.py       # 下载 / 校验 / 安装 FFmpeg 静态构建到 bin/
 ├── bin/                      # 内置 ffmpeg、ffprobe（已 gitignore，只保留 README）
 ├── data/

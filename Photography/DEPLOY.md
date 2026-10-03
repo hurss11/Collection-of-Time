@@ -150,6 +150,45 @@ proxy_set_header X-Forwarded-Proto $scheme;
 > `X-Content-Type-Options`、`Referrer-Policy`）。CSP 里脚本与样式都只允许同源外部文件——
 > 前端不含内联脚本 / 样式，因此不需要放开 `unsafe-inline`；覆盖或追加 CSP 时请保留这条约束。
 
+### 5.1 一条命令配好 HTTPS（推荐）
+
+```bash
+sudo ./run.sh https --domain photos.example.com --email you@example.com
+```
+
+内部按这个顺序做，任何一步失败都会停下并保留/回滚原配置：
+
+| 步骤 | 做什么 | 失败时会怎样 |
+|------|--------|--------------|
+| 1 | 预检：域名、后端端口、nginx 是否就绪 | 缺 nginx 直接告诉你怎么装 |
+| 2 | 装上「只有 80 端口」的配置（含 ACME 校验目录） | `nginx -t` 不过就回滚，不 reload |
+| 3 | `certbot certonly --webroot` 签发证书 | 报出常见原因（DNS、80 被占） |
+| 4 | 换成「80 跳转 + 443 反代」完整配置 | 同上，回滚到上一步的可用配置 |
+| 5 | 跑 `tools/check_https.py` 做线上验收 | 有失败项会列出排查方向 |
+
+不加 `sudo` 也能跑，脚本会自动加 `sudo`；`--dry-run` 只打印将要执行的命令与配置内容，不动任何东西。
+
+### 5.2 上线自检清单（P1：明文 HTTP 下 Cookie 不 Secure）
+
+```bash
+./run.sh https --check-only --domain photos.example.com     # 或：
+python tools/check_https.py https://photos.example.com
+```
+
+逐项确认（`--username/--password` 可带上账号，连会话 Cookie 一起验）：
+
+- [ ] `http://` 会 308 跳到 `https://`（否则密码仍可能走明文）
+- [ ] 证书链可信、SAN 覆盖该域名、剩余有效期 > 14 天
+- [ ] `Content-Security-Policy` / `X-Frame-Options` / `X-Content-Type-Options` / `Referrer-Policy` 都在（反代没剥掉）
+- [ ] `HSTS` 已在「确认全站 HTTPS」之后开启
+- [ ] **`Set-Cookie` 带 `Secure`**（漏配 `X-Forwarded-Proto` 时这里会失败，这正是 P1 的验收点）
+- [ ] 会话 Cookie 带 `HttpOnly` + `SameSite`
+- [ ] `/data/`、`/assets/img/` 返回 403（目录列表关闭）
+- [ ] `/admin.config.json`、`/admin.py`、`/adminlib/query.py` 返回 404（源码与配置不可下载）
+- [ ] `/api/state` 未登录返回 401（后台接口没被公开）
+
+自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。
+
 > **注意**：作品集前台的搜索 / 筛选 / 排序与 EXIF 解析现在都由后端提供
 > （`/api/public/*`），上面的 `location /api/` 规则已经把它们一并代理过去。
 > 如果只把静态目录裸露出去（不经后端），前台会拿不到数据——

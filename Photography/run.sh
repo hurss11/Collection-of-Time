@@ -549,6 +549,259 @@ systemd() {
   info "  sudo systemctl daemon-reload && sudo systemctl enable --now $unit_name"
 }
 
+# ---------- HTTPS 反向代理（明文 HTTP 会让会话 Cookie 丢掉 Secure） ----------
+
+https_usage() {
+  cat <<'USAGE'
+./run.sh https --domain photos.example.com [--email you@example.com]
+
+  给 nginx 配好「HTTPS 反代 + 80 跳转 + 转发 X-Forwarded-Proto」，签发证书，
+  最后从外部跑一次自检（python tools/check_https.py）。
+
+  --domain HOST   对外域名（必填），例如 photos.example.com
+  --email ADDR    证书到期通知邮箱；首次签发建议提供
+  --port N        后端监听端口，默认 8080
+  --name NAME     nginx 站点配置文件名，默认 photography
+  --no-certbot    只装反代配置，不动证书（证书由你自己的流程签发）
+  --check-only    只跑线上自检，不改任何配置
+  --insecure      自检时跳过证书校验（自签证书 / 内网用）
+  --dry-run       只打印将要执行的步骤和配置内容，不改任何东西
+
+前提：dns 已把域名解析到本机，且 80 / 443 端口没有被别的服务占用。
+USAGE
+}
+
+SUDO=""
+
+run_root() {
+  if [ -n "$SUDO" ]; then "$SUDO" "$@"; else "$@"; fi
+}
+
+nginx_conf_dir() {
+  if [ -d /etc/nginx/sites-available ]; then
+    echo /etc/nginx/sites-available
+  else
+    echo /etc/nginx/conf.d
+  fi
+}
+
+nginx_link_dir() {
+  if [ -d /etc/nginx/sites-enabled ]; then echo /etc/nginx/sites-enabled; else echo ""; fi
+}
+
+# 写入配置并预检；失败就自动回滚，尽量别把现有站点搞挂
+install_nginx_conf() {
+  local content="$1"
+  local conf_dir="$2"
+  local link_dir="$3"
+  local name="$4"
+  local target="$conf_dir/$name.conf"
+  local backup=""
+  local had_link=0
+  local created_link=0
+  local stamp
+  stamp="$(date +%Y%m%d%H%M%S)"
+
+  if [ -f "$target" ]; then
+    backup="$target.bak.$stamp"
+    run_root cp -a "$target" "$backup" || return 1
+    info "  已备份原配置：$backup"
+  fi
+
+  printf '%s\n' "$content" | run_root tee "$target" >/dev/null || return 1
+  if [ -n "$link_dir" ]; then
+    if [ -e "$link_dir/$name.conf" ]; then
+      had_link=1
+    else
+      run_root ln -sf "$target" "$link_dir/$name.conf" || return 1
+      created_link=1
+    fi
+  fi
+
+  if run_root nginx -t; then
+    if ! run_root systemctl reload nginx 2>/dev/null; then
+      run_root nginx -s reload 2>/dev/null || {
+        err "nginx reload 失败，请手动检查： sudo systemctl status nginx"
+        return 1
+      }
+    fi
+    ok "nginx 配置已生效：$target"
+    return 0
+  fi
+
+  # 预检没过 → 回滚到备份，或把这次新增的文件清掉
+  err "nginx -t 未通过，正在回滚"
+  if [ -n "$backup" ]; then
+    run_root cp -a "$backup" "$target" || return 1
+    run_root nginx -t >/dev/null 2>&1 && info "  已恢复原配置：$target"
+  else
+    [ "$created_link" = "1" ] && run_root rm -f "$link_dir/$name.conf"
+    [ "$had_link" = "0" ] && run_root rm -f "$target"
+  fi
+  info "  排查： sudo nginx -t   # 上面会指出出错的行"
+  return 1
+}
+
+https() {
+  local domain="" email="" name="photography" port="${PORT:-8080}"
+  local dry=0 no_certbot=0 check_only=0 insecure=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --domain)     domain="${2:-}"; shift 2 ;;
+      --email)      email="${2:-}"; shift 2 ;;
+      --name)       name="${2:-}"; shift 2 ;;
+      --port)       port="${2:-}"; shift 2 ;;
+      --no-certbot) no_certbot=1; shift ;;
+      --check-only) check_only=1; shift ;;
+      --insecure)   insecure=1; shift ;;
+      --dry-run)    dry=1; shift ;;
+      -h|--help)    https_usage; return 0 ;;
+      *)            err "未知参数：$1"; https_usage; return 2 ;;
+    esac
+  done
+
+  [ -n "$domain" ] || { err "缺少 --domain（例如 --domain photos.example.com）"; https_usage; return 2; }
+  require_python
+
+  if [ "$check_only" = "1" ]; then
+    if [ "$insecure" = "1" ]; then
+      py tools/check_https.py "https://$domain" --insecure
+    else
+      py tools/check_https.py "https://$domain"
+    fi
+    return $?
+  fi
+
+  local conf_dir link_dir webroot="/var/www/html"
+  conf_dir="$(nginx_conf_dir)"
+  link_dir="$(nginx_link_dir)"
+
+  local stage_http stage_full
+  stage_http="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" --http-only)" || return 1
+  stage_full="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port")" || return 1
+
+  if [ "$dry" = "1" ]; then
+    step "1/4 预检（dry-run：不执行任何改动）"
+    info "  nginx 配置目录 : $conf_dir"
+    if command -v nginx >/dev/null 2>&1; then
+      info "  nginx          : $(command -v nginx)"
+    else
+      warn "  nginx          : 未安装（apt-get install -y nginx certbot）"
+    fi
+    info "  后端地址       : http://127.0.0.1:$port"
+    info ""
+    step "2/4 先装只含 80 端口的配置，用它完成证书校验"
+    info "  sudo tee $conf_dir/$name.conf <<'NGINX'"
+    printf '%s\n' "$stage_http"
+    info "  NGINX"
+    [ -n "$link_dir" ] && info "  sudo ln -sf $conf_dir/$name.conf $link_dir/$name.conf"
+    info "  sudo nginx -t && sudo systemctl reload nginx"
+    info ""
+    step "3/4 签发证书"
+    if [ "$no_certbot" = "1" ]; then
+      info "  （--no-certbot：跳过，请自行签发到 /etc/letsencrypt/live/$domain/）"
+    else
+      info "  sudo certbot certonly --webroot -w $webroot -d $domain --agree-tos ${email:+-m $email}"
+    fi
+    info ""
+    step "4/4 换成完整配置（80 跳转 + 443 反代），再自检"
+    info "  sudo tee $conf_dir/$name.conf <<'NGINX'"
+    printf '%s\n' "$stage_full"
+    info "  NGINX"
+    info "  sudo nginx -t && sudo systemctl reload nginx"
+    info "  python tools/check_https.py https://$domain"
+    return 0
+  fi
+
+  if ! command -v nginx >/dev/null 2>&1; then
+    err "没有检测到 nginx。先安装："
+    info "  sudo apt-get update && sudo apt-get install -y nginx"
+    info "  sudo apt-get install -y certbot python3-certbot-nginx   # 签发证书用"
+    return 1
+  fi
+
+  if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+  else
+    SUDO="sudo"
+    if ! sudo -n true 2>/dev/null; then
+      info "下面会用到 sudo，可能需要输入密码。"
+    fi
+  fi
+
+  step "1/4 预检"
+  info "  域名      : $domain"
+  info "  后端      : http://127.0.0.1:$port"
+  info "  配置目录  : $conf_dir"
+  if ! py - "$port" <<'PY'
+import socket, sys
+sock = socket.socket()
+sock.settimeout(2)
+try:
+    sock.connect(("127.0.0.1", int(sys.argv[1])))
+    print("ok")
+except OSError as exc:
+    print(f"fail: {exc}")
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+  then
+    warn "  后端 $port 端口暂时连不上——先启动服务（./run.sh start）再做后面几步更稳妥"
+  fi
+
+  step "2/4 装 80 端口配置（供证书校验使用）"
+  install_nginx_conf "$stage_http" "$conf_dir" "$link_dir" "$name" || return 1
+
+  step "3/4 签发证书"
+  local cert_dir="/etc/letsencrypt/live/$domain"
+  if run_root test -f "$cert_dir/fullchain.pem"; then
+    ok "  证书已存在：$cert_dir"
+  elif [ "$no_certbot" = "1" ]; then
+    warn "  未签发证书（--no-certbot），请自行放到 $cert_dir"
+  else
+    if ! command -v certbot >/dev/null 2>&1; then
+      err "没有 certbot。装一个："
+      info "  sudo apt-get install -y certbot"
+      return 1
+    fi
+    local certbot_args=(certonly --webroot -w "$webroot" -d "$domain" --non-interactive --agree-tos)
+    if [ -n "$email" ]; then
+      certbot_args+=(-m "$email")
+    else
+      warn "  未提供 --email，改用 --register-unsafely-without-email（收不到续期提醒）"
+      certbot_args+=(--register-unsafely-without-email)
+    fi
+    if ! run_root certbot "${certbot_args[@]}"; then
+      err "证书签发失败。常见原因："
+      info "  - 域名未解析到本机，或 80 端口被占用/被墙"
+      info "  - webroot 不可写：把 --webroot 指向 $webroot 之外的位置时请自行确认"
+      return 1
+    fi
+    ok "  证书已签发：$cert_dir"
+  fi
+
+  step "4/4 换成完整配置并自检"
+  install_nginx_conf "$stage_full" "$conf_dir" "$link_dir" "$name" || return 1
+
+  info ""
+  info "线上自检（会真的请求一次 https://$domain ）："
+  if py tools/check_https.py "https://$domain"; then
+    ok "全部通过：HTTPS 反代与 Secure Cookie 都已生效"
+  else
+    warn "自检有失败项，按上面的提示修；常见原因："
+    info "  - 证书还没签发成功（443 段起不来）"
+    info "  - 反代漏转发 X-Forwarded-Proto（会话 Cookie 就不会带 Secure）"
+    info "  - 上游服务没在 127.0.0.1:$port 监听"
+  fi
+  info ""
+  info "日常排查："
+  info "  ./run.sh https --check-only --domain $domain      # 只跑自检"
+  info "  sudo nginx -t && sudo systemctl reload nginx      # 改完配置重载"
+  info "  sudo certbot renew --dry-run                      # 续期演练"
+}
+
 # ---------- 打包：准备迁移到服务器 ----------
 
 sha256_of() {
@@ -605,7 +858,7 @@ package() {
            admin/index.html admin/js/app.js admin/css/admin.css \
            adminlib/store.py adminlib/auth.py adminlib/media.py adminlib/exifread.py \
            adminlib/query.py adminlib/schema.py \
-           tools/fetch_ffmpeg.py tools/make_posters.py \
+           tools/fetch_ffmpeg.py tools/make_posters.py tools/check_https.py \
            data/albums.json data/photos.json data/videos.json; do
     [ -e "$f" ] || missing="$missing $f"
   done
@@ -828,6 +1081,7 @@ Photography 一键运行脚本
   ./run.sh create-user     创建管理员账号
   ./run.sh reset-password  重置管理员密码
   ./run.sh systemd         [--install] 生成/安装 systemd 常驻服务
+  ./run.sh https           [--domain D] 配 HTTPS 反代 + 签发证书 + 线上自检
   ./run.sh help            显示本帮助
 
 可选参数（start / restart）：
@@ -870,6 +1124,7 @@ main() {
     create-user)    create_user "$@" ;;
     reset-password) reset_password "$@" ;;
     systemd)        systemd "$@" ;;
+    https|https-proxy|ssl) https "$@" ;;
     help|-h|--help) usage ;;
     *)              err "未知命令：$command"; info ""; usage; exit 2 ;;
   esac

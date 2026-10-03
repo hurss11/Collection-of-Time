@@ -1522,6 +1522,87 @@ WantedBy=multi-user.target
 """
 
 
+def nginx_config(domain: str, port: int, name: str = "photography",
+                 upstream: str = "127.0.0.1", tls: bool = True,
+                 webroot: str = "/var/www/html") -> str:
+    """生成 nginx 反向代理配置。
+
+    tls=False 只输出 HTTP 段（申请证书前必须先有它，否则 443 段引用的
+    证书文件还不存在，`nginx -t` 会直接失败）。
+
+    关键点：转发 `X-Forwarded-Proto`，后端据此给会话 Cookie 打上 Secure，
+    否则浏览器会带着一个可在明文链路里被截获的 Cookie 访问 HTTPS 站点。
+    """
+    cert_dir = f"/etc/letsencrypt/live/{domain}"
+
+    header = (
+        f"# Collection of Time - {name} 反向代理\n"
+        f"# 由 `python admin.py --print-nginx --domain {domain}` 生成，改动前请先备份。\n"
+        f"# 安装：/etc/nginx/sites-available/{name}.conf → 软链到 sites-enabled/ → nginx -t → reload\n"
+    )
+
+    http_block = f"""server {{
+    listen 80;
+    listen [::]:80;
+    server_name {domain};
+
+    # certbot --webroot 的校验文件走这里，其余请求全部跳 HTTPS
+    location /.well-known/acme-challenge/ {{
+        root {webroot};
+        default_type "text/plain";
+    }}
+
+    location / {{
+        return 308 https://$host$request_uri;
+    }}
+}}
+"""
+
+    if not tls:
+        return header + "\n" + http_block
+
+    https_block = f"""server {{
+    # 老版本 nginx 用这种写法；1.25.1+ 可改为 `listen 443 ssl;` 加 `http2 on;`
+    # （新写法在旧版本上是未知指令，会让 nginx -t 直接失败，所以默认用兼容写法）
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {domain};
+
+    ssl_certificate     {cert_dir}/fullchain.pem;
+    ssl_certificate_key {cert_dir}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # HSTS：确认该域名只走 HTTPS 之后再考虑加 includeSubDomains
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # 上传 4K 视频可能几百 MB，别让 nginx 提前掐断
+    client_max_body_size 512m;
+    proxy_request_buffering off;
+    proxy_http_version 1.1;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    # 后端的安全响应头（CSP 等）原样透传，不要在这里覆盖
+    proxy_pass http://{upstream}:{port};
+
+    # 后端据此判断「本次请求走的是 HTTPS」，从而给会话 Cookie 加 Secure
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Host $host;
+
+    # 纵深防御：源码 / 配置文件即便漏到站点目录也不会被下载
+    location = /admin.config.json {{ return 404; }}
+    location ~ /\\.(?!well-known) {{ return 404; }}
+}}
+"""
+
+    return header + "\n" + http_block + "\n" + https_block
+
+
 # ============================================================
 # 账号维护（命令行）
 # ============================================================
@@ -1667,6 +1748,14 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--print-systemd", action="store_true",
                         help="打印 systemd 单元文件后退出")
+    parser.add_argument("--print-nginx", action="store_true",
+                        help="打印 nginx HTTPS 反向代理配置后退出（配合 --domain 使用）")
+    parser.add_argument("--domain", default="", metavar="HOST",
+                        help="对外域名，例如 photos.example.com（--print-nginx 用）")
+    parser.add_argument("--nginx-name", default="photography", metavar="NAME",
+                        help="nginx 站点配置名，默认 photography（--print-nginx 用）")
+    parser.add_argument("--http-only", action="store_true",
+                        help="只生成 HTTP 段（申请证书前用），配合 --print-nginx")
     parser.add_argument("--ffmpeg-status", action="store_true",
                         help="打印 FFmpeg 探测结果后退出")
     parser.add_argument("--fetch-ffmpeg", action="store_true",
@@ -1690,6 +1779,14 @@ def main() -> int:
 
     if args.print_systemd:
         print(systemd_unit(args.port, args.session_hours))
+        return 0
+
+    if args.print_nginx:
+        if not args.domain:
+            print("缺少 --domain，例如：python admin.py --print-nginx --domain photos.example.com",
+                  file=sys.stderr)
+            return 2
+        print(nginx_config(args.domain, args.port, name=args.nginx_name, tls=not args.http_only))
         return 0
 
     external = args.host not in ("127.0.0.1", "localhost", "::1")
