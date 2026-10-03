@@ -282,6 +282,26 @@ def run_checks(args: argparse.Namespace) -> Reporter:
     status, _, _ = fetch(base + "/api/state", context=context)
     report.add(status in (401, 403), "后台接口需要登录", f"GET /api/state → {status}")
 
+    # 7. 缓存策略：静态资源重验证（304 省流量），接口不缓存
+    status, headers, _ = fetch(base + "/assets/css/main.css", context=context)
+    if status == 404:
+        report.add(None, "静态资源缓存策略", "没找到 /assets/css/main.css，跳过（改过目录结构？）")
+    else:
+        cache_control = header_of(headers, "Cache-Control")
+        last_modified = header_of(headers, "Last-Modified")
+        healthy = "no-store" not in cache_control and bool(last_modified)
+        report.add(healthy, "静态资源缓存策略",
+                   f"Cache-Control: {cache_control or '(缺失)'}"
+                   + ("" if last_modified else "；缺少 Last-Modified"))
+        if last_modified:
+            status2, _, _ = fetch(base + "/assets/css/main.css",
+                                  headers={"If-Modified-Since": last_modified}, context=context)
+            report.add(status2 == 304, "静态资源重验证",
+                       f"带 If-Modified-Since 再请求 → {status2}（期望 304，不重传内容）")
+    status, headers, _ = fetch(base + "/api/public/site", context=context)
+    api_cache = header_of(headers, "Cache-Control")
+    report.add("no-store" in api_cache, "接口响应不缓存", f"Cache-Control: {api_cache or '(缺失)'}")
+
     # 7. 可选：真的登录一次，看会话 Cookie 的 Secure
     if args.username:
         jar = {name: str(attrs["value"]) for name, attrs in cookies.items()}

@@ -168,6 +168,26 @@ sudo ./run.sh https --domain photos.example.com --email you@example.com
 
 不加 `sudo` 也能跑，脚本会自动加 `sudo`；`--dry-run` 只打印将要执行的命令与配置内容，不动任何东西。
 
+生成的配置里已经包含：
+
+- `X-Forwarded-Proto` / `X-Forwarded-For` 转发（前者决定 Cookie 是否带 `Secure`，后者决定
+  后台登录限流按**真实客户端 IP** 计数）；
+- **gzip**（首屏基本是 JS/CSS/JSON，压缩后约为原来三成）；
+- `client_max_body_size 512m` 与关闭 `proxy_request_buffering`，避免大视频上传被截断；
+- 源码 / 配置文件的 404 兜底与 dotfile 拦截。
+
+> **并发提示**：内置的 Python 静态服务在几十人同时浏览时开始劣化（瓶颈是线程与 GIL）。
+> 若要对外放开，把静态文件交给 nginx、Python 只跑 API 即可——配置里已按你的项目路径
+> 准备好注释块，取消注释并让后端以 `--no-static` 启动：
+>
+> ```bash
+> ./run.sh start --host 127.0.0.1 --no-static      # 只跑 API
+> # 再取消 nginx 配置里 location / 与 location /assets/ 两段的注释
+> ```
+>
+> `location /assets/ { expires -1; }` 配的是「缓存但每次重验证」：nginx 用 ETag/Last-Modified
+> 直接回 304，既不传内容也不会出现旧封面。
+
 ### 5.2 上线自检清单（P1：明文 HTTP 下 Cookie 不 Secure）
 
 ```bash
@@ -186,6 +206,8 @@ python tools/check_https.py https://photos.example.com
 - [ ] `/data/`、`/assets/img/` 返回 403（目录列表关闭）
 - [ ] `/admin.config.json`、`/admin.py`、`/adminlib/query.py` 返回 404（源码与配置不可下载）
 - [ ] `/api/state` 未登录返回 401（后台接口没被公开）
+- [ ] 静态资源回 `Cache-Control: public, no-cache` 且带 `Last-Modified`（刷新应命中 304，而不是重下整包）
+- [ ] `/api/**` 回 `no-store`（接口响应不落缓存）
 
 自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。
 

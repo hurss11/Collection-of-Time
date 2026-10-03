@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -39,7 +40,7 @@ import subprocess
 import sys
 import time
 import traceback
-from email import policy
+from email import policy, utils as email_utils
 from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -74,6 +75,11 @@ PUBLIC_PREFIXES = ("/api/public/",)
 # 因此只放行前端真正会用到的路径，其余一律 404。
 STATIC_ROOT_FILES = {"index.html", "favicon.svg"}
 STATIC_ROOT_DIRS = {"assets", "data"}
+
+# 允许「缓存但每次重验证」的路径：命中 304 时只回响应头，省掉整包流量；
+# 又因为是重验证而不是长缓存，改完刷新立刻生效（不会看到旧封面）。
+CACHE_REVALIDATE_PREFIXES = ("/assets/", "/admin/js/", "/admin/css/")
+CACHE_REVALIDATE_FILES = ("/favicon.svg",)
 
 STORE = store.Store(ROOT)
 # 查找顺序：COT_FFMPEG 环境变量 → 项目 bin/ → 系统 PATH；verify 会真跑一次 -version
@@ -117,6 +123,25 @@ def _first(params: dict[str, list[str]], key: str, default: str = "") -> str:
     return (values[0] if values else "") or default
 
 
+# 可信代理来源：本机、链路本地与 RFC1918 / ULA 内网段。
+# 刻意不含 100.64.0.0/10（运营商 CGNAT）与文档 / 保留段——这些地址可能直接来自
+# 公网侧，采信它们的 X-Forwarded-For 等于给「伪造转发头绕过限流」留后门。
+TRUSTED_PROXY_NETS = tuple(ipaddress.ip_network(net) for net in (
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "169.254.0.0/16", "fe80::/10", "fc00::/7",
+))
+
+
+def _is_local_peer(peer: str) -> bool:
+    """对端是否来自本机 / 内网（说明前面有反向代理，才值得采信转发头）。"""
+    try:
+        address = ipaddress.ip_address(peer.split("%")[0])
+    except ValueError:
+        return False
+    return any(address in net for net in TRUSTED_PROXY_NETS)
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "CollectionOfTime"     # 不暴露具体版本号
     sys_version = ""                        # 也不暴露 Python 版本
@@ -135,11 +160,48 @@ class Handler(SimpleHTTPRequestHandler):
 
     # ---------- 基础 ----------
 
+    def client_ip(self) -> str:
+        """真实客户端 IP，用于限流与日志。
+
+        反向代理（nginx 与后端同机）下 socket 对端永远是 127.0.0.1，直接拿它
+        对所有人计数会退化成「反代IP|用户名」：别人试错 5 次就能把管理员锁在门外。
+        因此**只在对端是内网 / 回环地址时**采信 `X-Forwarded-For` 的第一跳；
+        对端是公网地址时不采信，避免伪造这个头绕过限流。
+        """
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if not forwarded or not _is_local_peer(peer):
+            return peer
+        try:
+            candidate = ipaddress.ip_address(forwarded.split("%")[0])
+        except ValueError:
+            return peer
+        return peer if candidate.is_unspecified else str(candidate)
+
+    def address_string(self) -> str:
+        """日志与限流统一用真实客户端 IP。"""
+        return self.client_ip()
+
     def log_message(self, fmt: str, *args) -> None:            # noqa: A003
         sys.stderr.write("  %s - %s\n" % (self.address_string(), fmt % args))
 
+    def cache_control(self) -> str:
+        """按路径决定缓存策略。
+
+        - `/api/**`：可能带会话数据，一律不缓存；
+        - 前端静态资源：允许缓存但每次重验证（命中 304 只回响应头），
+          刷新时省掉整包流量，同时改完立刻生效；
+        - HTML 外壳：不缓存，升级后打开就是新页面。
+        """
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/api/"):
+            return "no-store"
+        if path.startswith(CACHE_REVALIDATE_PREFIXES) or path in CACHE_REVALIDATE_FILES:
+            return "public, no-cache"
+        return "no-store, must-revalidate"
+
     def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Cache-Control", self.cache_control())
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")
@@ -504,6 +566,25 @@ class Handler(SimpleHTTPRequestHandler):
             return None
         return super().send_head()
 
+    def not_modified(self, modified_at: float, extra: list[tuple[str, str]] | None = None) -> bool:
+        """客户端带了 If-Modified-Since 且文件没变 → 回 304，省掉整包内容。"""
+        since_header = self.headers.get("If-Modified-Since") or ""
+        if not since_header:
+            return False
+        try:
+            since = email_utils.parsedate_to_datetime(since_header).timestamp()
+        except (TypeError, ValueError):
+            return False
+        if int(modified_at) > since:
+            return False
+
+        self.send_response(HTTPStatus.NOT_MODIFIED)
+        self.send_header("Last-Modified", self.date_time_string(int(modified_at)))
+        for key, value in (extra or []):
+            self.send_header(key, value)
+        self.end_headers()
+        return True
+
     def serve_admin_index(self) -> None:
         index = ADMIN_DIR / "index.html"
         if not index.is_file():
@@ -528,7 +609,11 @@ class Handler(SimpleHTTPRequestHandler):
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
             ctype += "; charset=utf-8"
-        self._send(HTTPStatus.OK, target.read_bytes(), ctype)
+        modified_at = int(target.stat().st_mtime)
+        if self.not_modified(modified_at):
+            return
+        self._send(HTTPStatus.OK, target.read_bytes(), ctype,
+                   extra=[("Last-Modified", self.date_time_string(modified_at))])
 
     # ============================================================
     # API
@@ -1561,6 +1646,7 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     if not tls:
         return header + "\n" + http_block
 
+    root_path = str(ROOT)
     https_block = f"""server {{
     # 老版本 nginx 用这种写法；1.25.1+ 可改为 `listen 443 ssl;` 加 `http2 on;`
     # （新写法在旧版本上是未知指令，会让 nginx -t 直接失败，所以默认用兼容写法）
@@ -1577,6 +1663,14 @@ def nginx_config(domain: str, port: int, name: str = "photography",
 
     # HSTS：确认该域名只走 HTTPS 之后再考虑加 includeSubDomains
     add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # 首屏基本是 JS / CSS / JSON，压缩后体积约为原来的三成
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 512;
+    gzip_proxied any;
+    gzip_types text/plain text/css text/html application/javascript application/json
+               application/xml image/svg+xml;
 
     # 上传 4K 视频可能几百 MB，别让 nginx 提前掐断
     client_max_body_size 512m;
@@ -1597,6 +1691,18 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     # 纵深防御：源码 / 配置文件即便漏到站点目录也不会被下载
     location = /admin.config.json {{ return 404; }}
     location ~ /\\.(?!well-known) {{ return 404; }}
+
+    # 想再快一档（几十人以上并发）：静态文件交给 nginx，Python 只跑 API。
+    #   1) 让后端只跑 API：./run.sh start --host 127.0.0.1 --no-static
+    #   2) 取消下面两段的注释（root 已按当前项目目录填好）
+    # location / {{
+    #     root {root_path};
+    #     try_files $uri $uri/ /index.html;
+    # }}
+    # location /assets/ {{
+    #     root {root_path};
+    #     expires -1;            # 每次都重验证：命中 304 不传内容，改完立刻生效
+    # }}
 }}
 """
 

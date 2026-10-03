@@ -56,8 +56,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def version_string(self) -> str:
         return self.server_version
 
+    def cache_control(self) -> str:
+        """静态资源缓存但重验证（304 省流量且改完立刻生效），其余不缓存。"""
+        path = self.path.split("?", 1)[0]
+        if path.startswith(("/assets/", "/admin/js/", "/admin/css/")) or path == "/favicon.svg":
+            return "public, no-cache"
+        return "no-store, must-revalidate"
+
     def end_headers(self) -> None:  # noqa: D102
-        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Cache-Control", self.cache_control())
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "same-origin")

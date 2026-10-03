@@ -371,7 +371,20 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 - 响应头统一带 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy` 与
   **CSP**（`default-src 'self'`，脚本、样式都只允许外部文件，不用 `unsafe-inline`）；
 - `Server` 头只回 `CollectionOfTime`，不暴露 Python 版本与框架信息；
+- 登录失败按**真实客户端 IP** + 用户名限流：反向代理下用 `X-Forwarded-For` 的第一跳
+  （只有当对端是本机 / 内网地址时才采信，公网直连伪造该头无效），因此反代后面
+  每个访客各自计数，别人试错不会把管理员锁在门外；
 - `--no-auth` 只在监听本机时才允许使用（本地调试用）。
+
+### 静态资源与缓存
+
+- HTML 外壳与 `/api/**` 一律 `no-store`：升级后打开即是新页面，接口响应不会被缓存；
+- `/assets/**`、`/admin/js|css/**`、`favicon.svg` 用 `public, no-cache`：**允许缓存但每次重验证**，
+  命中 `304` 只回响应头，刷新时省掉整包流量（实测首屏 JS/CSS 从 53KB 降到 1.5KB），
+  同时改完文件刷新立刻生效——不会出现「长缓存看到旧封面」的问题。
+- 之所以不给这些文件加 `max-age`+`immutable`：封面、缩略图、视频都是**固定文件名就地替换**的
+  （`assets/video/posters/<id>.jpg`），长缓存会让人看到旧图。若将来给文件名加内容指纹，
+  就可以在反代层放心开一年长缓存。
 
 ### 服务器部署
 
