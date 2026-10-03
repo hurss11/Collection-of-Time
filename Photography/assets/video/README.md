@@ -2,14 +2,20 @@
 
 ```
 assets/video/
-├── landscape-sunrise.mp4      # 网页播放用的压缩版本（H.264 / H.265，建议 ≤ 20MB）
-├── star-trails-timelapse.mp4
-├── posters/                   # 封面图（由 tools/make_posters.py 生成）
+├── landscape-sunrise.mp4      # 占位样片（1280×720 / 4 秒 / H.264，见下方说明）
+├── star-trails-timelapse.mp4  # 占位样片
+├── posters/                   # 封面图
 │   ├── v-001.svg
 │   └── landscape-sunrise.jpg
 ├── originals/                 # 原始素材，已在 .gitignore 中忽略
 └── raw/                       # 未压缩导出，已在 .gitignore 中忽略
 ```
+
+> **两个 mp4 是占位样片**：为了让示例数据开箱即可播放，仓库里放了 4 秒的测试图案片段
+> （`ffmpeg -f lavfi -i testsrc ...` 生成，各 7–33KB），不是真实作品。
+> 换成自己的成片时：替换同名文件，并把 `data/videos.json` 里的 `duration` / `resolution`
+> / `exif.fps` 改成实际值（页面上的「视频参数」直接读这些字段）。
+> 建议码率与导出参数见下表。
 
 ## 推荐导出参数
 

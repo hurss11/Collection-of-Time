@@ -173,20 +173,29 @@ sudo ./run.sh https --domain photos.example.com --email you@example.com
 - `X-Forwarded-Proto` / `X-Forwarded-For` 转发（前者决定 Cookie 是否带 `Secure`，后者决定
   后台登录限流按**真实客户端 IP** 计数）；
 - **gzip**（首屏基本是 JS/CSS/JSON，压缩后约为原来三成）；
+- **限流**：`/api/public/*` 每 IP 20 次/秒（burst 40）、`/api/auth/login` 1 次/秒（burst 5），
+  都返回 429；
 - `client_max_body_size 512m` 与关闭 `proxy_request_buffering`，避免大视频上传被截断；
+- `/api/` 与 `/admin/` 独立代理（所以后面切静态托管时后台不会跟着失效）；
 - 源码 / 配置文件的 404 兜底与 dotfile 拦截。
 
+实测（真 nginx 1.24 + 真后端，`scripts` 之外的临时环境）：
+首页/HSTS/CSP 透传、静态 `public, no-cache`、gzip、Cookie `Secure`、80→308、
+`/api/public/` 连打 80 次出现 429 —— 15 项全通过。
+
 > **并发提示**：内置的 Python 静态服务在几十人同时浏览时开始劣化（瓶颈是线程与 GIL）。
-> 若要对外放开，把静态文件交给 nginx、Python 只跑 API 即可——配置里已按你的项目路径
-> 准备好注释块，取消注释并让后端以 `--no-static` 启动：
+> 若要对外放开，让 nginx 直接托管前台静态、Python 只跑 API 与 `/admin/`：
 >
 > ```bash
-> ./run.sh start --host 127.0.0.1 --no-static      # 只跑 API
-> # 再取消 nginx 配置里 location / 与 location /assets/ 两段的注释
+> sudo ./run.sh https --domain photos.example.com --email you@example.com --static
+> ./run.sh start --host 127.0.0.1 --no-static      # 后端只跑 API 与 /admin/
 > ```
 >
-> `location /assets/ { expires -1; }` 配的是「缓存但每次重验证」：nginx 用 ETag/Last-Modified
-> 直接回 304，既不传内容也不会出现旧封面。
+> `--static` 会把 `location /` 与 `/assets/` 换成 nginx 直接读磁盘（`expires -1`：每次都重验证，
+> 命中 304 不传内容），并**补上 CSP、HSTS 等安全响应头**——注意 nginx 的 `add_header`
+> 不与上层合并，location 里一旦写了 `add_header`，server 段的 HSTS 就失效，所以那里重复写了一遍。
+> 同样实测 15 项全通过（首页 200 + HSTS + CSP、`/assets/` 由 nginx 直接回且带 ETag、
+> `/api/*` 与 `/admin/` 仍走代理、限流生效）。
 
 ### 5.2 上线自检清单（P1：明文 HTTP 下 Cookie 不 Secure）
 
@@ -206,8 +215,11 @@ python tools/check_https.py https://photos.example.com
 - [ ] `/data/`、`/assets/img/` 返回 403（目录列表关闭）
 - [ ] `/admin.config.json`、`/admin.py`、`/adminlib/query.py` 返回 404（源码与配置不可下载）
 - [ ] `/api/state` 未登录返回 401（后台接口没被公开）
-- [ ] 静态资源回 `Cache-Control: public, no-cache` 且带 `Last-Modified`（刷新应命中 304，而不是重下整包）
+- [ ] 静态资源回 `Cache-Control: public, no-cache`（或 nginx 的 `no-cache`）且带
+      `Last-Modified` / `ETag`（刷新应命中 304，而不是重下整包）
 - [ ] `/api/**` 回 `no-store`（接口响应不落缓存）
+- [ ] 连打 `/api/public/site` 60 次会出现 `429`（反代层限流生效）
+- [ ] `README.md` 里 `assets/video/*.mp4` 两个占位样片存在（示例卡片不会点开就报错）
 
 自检退出码：`0` 全通过、`1` 有失败项、`2` 参数或网络错误，方便放进 CI / 上线脚本里当门禁。
 
@@ -231,7 +243,7 @@ curl -sI http://127.0.0.1:8080/ | head -3                  # 记下当前版本�
 
 验证：上面两条命令都有输出，备份目录里能看到 `albums.json photos.json videos.json`。
 
-**第 1 步 · 部署新构建**（旧构建仍把所有静态资源设成 `no-store`）
+**第 1 步 · 部署新构建**（旧构建仍把所有静态资源设成 `no-store`，示例视频也缺文件）
 
 ```bash
 git pull                                  # 或上传并解压新的迁移包
@@ -242,9 +254,11 @@ git pull                                  # 或上传并解压新的迁移包
 
 ```bash
 curl -sI http://127.0.0.1:8080/assets/css/main.css | grep -i cache-control
+ls -l assets/video/*.mp4                  # 应有 landscape-sunrise.mp4 与 star-trails-timelapse.mp4
 ```
 
-预期：`Cache-Control: public, no-cache`。若还是 `no-store, must-revalidate`，说明跑的是旧代码。
+预期：`Cache-Control: public, no-cache`；两个占位 mp4 存在（各几十 KB）。
+若还是 `no-store` 或没有 mp4，说明跑的是旧代码。
 
 **第 2 步 · 让后端只监听本机**（公网 8080 的口子先关掉）
 
@@ -288,9 +302,8 @@ sudo ./run.sh https --domain photos.example.com --email you@example.com         
 前台会直接 404。
 
 ```bash
+sudo ./run.sh https --domain photos.example.com --email you@example.com --static   # 生成静态托管版配置
 ./run.sh restart --host 127.0.0.1 --no-static     # 后端只跑 API 与 /admin/
-sudo nano /etc/nginx/sites-available/photography.conf   # 取消 location / 与 location /assets/ 两段的注释
-sudo nginx -t && sudo systemctl reload nginx
 ```
 
 （RHEL / CentOS 是 `/etc/nginx/conf.d/photography.conf`。）
@@ -298,15 +311,24 @@ sudo nginx -t && sudo systemctl reload nginx
 验证：
 
 ```bash
-curl -sI https://photos.example.com/assets/css/main.css | grep -iE 'server|cache-control|etag'
-curl -sI https://photos.example.com/ | grep -i server
+curl -sI https://photos.example.com/assets/css/main.css | grep -iE 'server|etag|cache-control'
+curl -sI https://photos.example.com/ | grep -iE 'server|strict-transport|content-security'
 curl -s  https://photos.example.com/api/public/site | head -c 60       # API 仍有数据
-curl -sI https://photos.example.com/admin/ | grep -i server            # 后台仍由后端提供
+curl -sI https://photos.example.com/admin/ | grep -iE 'server|content-security'
 ```
 
-预期：`/` 与 `/assets/**` 由 nginx 直接回（`Server: nginx/...`，带 `ETag`，
-`Cache-Control: no-cache`）；`/api/**` 与 `/admin/` 仍是后端在回。想看极限值可以用
-`ab` 或 `hey` 压同一个 URL，对比第 4 步前后。
+预期：`/` 与 `/assets/**` 由 nginx 直接回（`ETag`、`Cache-Control: no-cache`，
+且 **HSTS 与 CSP 都在**）；`/api/**` 与 `/admin/` 仍是后端在回。
+
+顺手验证限流（`/api/public/` 每 IP 20 次/秒）：
+
+```bash
+for i in $(seq 1 60); do curl -s -o /dev/null -w '%{http_code}\n' https://photos.example.com/api/public/site; done \
+  | sort | uniq -c
+```
+
+预期：出现一批 `429`（突发超过 burst 40 之后）。想看并发极限可以用 `ab` 或 `hey` 压同一 URL，
+对比第 4 步前后。
 
 **第 5 步 · 确认限流用的是真实访客 IP**
 

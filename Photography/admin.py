@@ -142,6 +142,29 @@ def _is_local_peer(peer: str) -> bool:
     return any(address in net for net in TRUSTED_PROXY_NETS)
 
 
+def public_csp(connect_src: str = "'self'") -> str:
+    """前台页面的 CSP。
+
+    同时被 `Handler.content_security_policy()` 与 `nginx_config()` 使用——
+    静态文件交给 nginx 托管时，HTML 不再经过后端，若不在 nginx 里补上同样的策略，
+    前台就会悄悄丢掉 CSP。
+    """
+    return "; ".join([
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self' data: https: http:",
+        "media-src 'self' https: http:",
+        "frame-src https: http:",              # 外链视频播放器
+        f"connect-src {connect_src}",
+        "font-src 'self'",
+        "frame-ancestors 'self'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "object-src 'none'",
+    ])
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "CollectionOfTime"     # 不暴露具体版本号
     sys_version = ""                        # 也不暴露 Python 版本
@@ -244,20 +267,7 @@ class Handler(SimpleHTTPRequestHandler):
             ])
 
         connect = " ".join(["'self'", *origins])
-        return "; ".join([
-            "default-src 'self'",
-            "script-src 'self'",
-            "style-src 'self'",
-            "img-src 'self' data: https: http:",
-            "media-src 'self' https: http:",
-            "frame-src https: http:",              # 外链视频播放器
-            f"connect-src {connect}",
-            "font-src 'self'",
-            "frame-ancestors 'self'",
-            "base-uri 'self'",
-            "form-action 'self'",
-            "object-src 'none'",
-        ])
+        return public_csp(connect)
 
     def list_directory(self, path):                            # noqa: ANN001
         """禁止目录列表：只提供具体文件，避免把目录内容整份摊开。"""
@@ -1609,11 +1619,14 @@ WantedBy=multi-user.target
 
 def nginx_config(domain: str, port: int, name: str = "photography",
                  upstream: str = "127.0.0.1", tls: bool = True,
-                 webroot: str = "/var/www/html") -> str:
+                 webroot: str = "/var/www/html", static: bool = False) -> str:
     """生成 nginx 反向代理配置。
 
     tls=False 只输出 HTTP 段（申请证书前必须先有它，否则 443 段引用的
     证书文件还不存在，`nginx -t` 会直接失败）。
+
+    static=True 让 nginx 直接托管前台静态文件（需要用 `--no-static` 启动后端），
+    这一版必须自己补上安全响应头：静态 HTML 不再经过后端，不补就会丢掉 CSP。
 
     关键点：转发 `X-Forwarded-Proto`，后端据此给会话 Cookie 打上 Secure，
     否则浏览器会带着一个可在明文链路里被截获的 Cookie 访问 HTTPS 站点。
@@ -1624,6 +1637,15 @@ def nginx_config(domain: str, port: int, name: str = "photography",
         f"# Collection of Time - {name} 反向代理\n"
         f"# 由 `python admin.py --print-nginx --domain {domain}` 生成，改动前请先备份。\n"
         f"# 安装：/etc/nginx/sites-available/{name}.conf → 软链到 sites-enabled/ → nginx -t → reload\n"
+        f"#\n"
+        f"# 限流：公开只读接口与登录端点各一档（按访客 IP 计数）。\n"
+        f"# limit_req_zone 属于 http 上下文——站点文件本来就被 include 进 http 块，写在这里合法；\n"
+        f"# 名称带 {name}_ 前缀，避免和同服务器上别的站点撞车。\n"
+        f"# 反代在本机时 $binary_remote_addr 就是真实访客 IP；若前面还有云负载均衡 / CDN，\n"
+        f"# 需要配 ngx_http_realip_module（set_real_ip_from + real_ip_header）才能拿到真实 IP。\n"
+        f"limit_req_zone $binary_remote_addr zone={name}_public:10m rate=20r/s;\n"
+        f"limit_req_zone $binary_remote_addr zone={name}_login:10m rate=1r/s;\n"
+        f"limit_req_status 429;\n"
     )
 
     http_block = f"""server {{
@@ -1645,8 +1667,39 @@ def nginx_config(domain: str, port: int, name: str = "photography",
 
     if not tls:
         return header + "\n" + http_block
-
     root_path = str(ROOT)
+
+    if static:
+        front = f"""    # 前台静态文件由 nginx 直接托管（配合 ./run.sh start --no-static）
+    # 注意：nginx 的 add_header **不与上层合并**——location 里只要写了 add_header，
+    # server 段的 HSTS 就失效，所以下面每个 location 都要把 HSTS 重复一遍。
+    location / {{
+        root {root_path};
+        try_files $uri $uri/ /index.html;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        add_header Content-Security-Policy "{public_csp()}" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "same-origin" always;
+    }}
+
+    location /assets/ {{
+        root {root_path};
+        expires -1;            # 每次都重验证：命中 304 不传内容，改完立刻生效
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }}
+"""
+    else:
+        front = f"""    # 默认：整站（前台静态 + 后台 + API）都交给后端。
+    # 想让 nginx 直接托管前台静态（几十人以上并发更稳）：
+    #   python admin.py --print-nginx --domain {domain} --nginx-static
+    #   并用 ./run.sh start --host 127.0.0.1 --no-static 启动后端
+    location / {{
+        proxy_pass http://{upstream}:{port};
+    }}
+"""
+
     https_block = f"""server {{
     # 老版本 nginx 用这种写法；1.25.1+ 可改为 `listen 443 ssl;` 加 `http2 on;`
     # （新写法在旧版本上是未知指令，会让 nginx -t 直接失败，所以默认用兼容写法）
@@ -1665,11 +1718,12 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     add_header Strict-Transport-Security "max-age=31536000" always;
 
     # 首屏基本是 JS / CSS / JSON，压缩后体积约为原来的三成
+    # （text/html 不用写：nginx 打开 gzip 时本来就总是压缩它，重复写会告警）
     gzip on;
     gzip_vary on;
     gzip_min_length 512;
     gzip_proxied any;
-    gzip_types text/plain text/css text/html application/javascript application/json
+    gzip_types text/plain text/css application/javascript application/json
                application/xml image/svg+xml;
 
     # 上传 4K 视频可能几百 MB，别让 nginx 提前掐断
@@ -1679,30 +1733,38 @@ def nginx_config(domain: str, port: int, name: str = "photography",
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
 
-    # 后端的安全响应头（CSP 等）原样透传，不要在这里覆盖
-    proxy_pass http://{upstream}:{port};
-
     # 后端据此判断「本次请求走的是 HTTPS」，从而给会话 Cookie 加 Secure
+    # （proxy_set_header 可以写在 server 段，proxy_pass 不行——它只能写在 location 里）
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header Host $host;
 
+{front}
+    # 这两块**必须**保留：后台界面与全部写接口都靠它们，改成静态后台就废了
+    location /admin/ {{
+        proxy_pass http://{upstream}:{port};
+    }}
+
+    location /api/ {{
+        proxy_pass http://{upstream}:{port};
+    }}
+
+    # 公开只读接口：正常浏览（首屏 2 个请求）远达不到这个量，只挡刷接口的
+    location /api/public/ {{
+        limit_req zone={name}_public burst=40 nodelay;
+        proxy_pass http://{upstream}:{port};
+    }}
+
+    # 登录端点：应用层还有「5 次失败锁 5 分钟」，这里再兜一道防撞库
+    location = /api/auth/login {{
+        limit_req zone={name}_login burst=5 nodelay;
+        proxy_pass http://{upstream}:{port};
+    }}
+
     # 纵深防御：源码 / 配置文件即便漏到站点目录也不会被下载
     location = /admin.config.json {{ return 404; }}
     location ~ /\\.(?!well-known) {{ return 404; }}
-
-    # 想再快一档（几十人以上并发）：静态文件交给 nginx，Python 只跑 API。
-    #   1) 让后端只跑 API：./run.sh start --host 127.0.0.1 --no-static
-    #   2) 取消下面两段的注释（root 已按当前项目目录填好）
-    # location / {{
-    #     root {root_path};
-    #     try_files $uri $uri/ /index.html;
-    # }}
-    # location /assets/ {{
-    #     root {root_path};
-    #     expires -1;            # 每次都重验证：命中 304 不传内容，改完立刻生效
-    # }}
 }}
 """
 
@@ -1862,6 +1924,8 @@ def main() -> int:
                         help="nginx 站点配置名，默认 photography（--print-nginx 用）")
     parser.add_argument("--http-only", action="store_true",
                         help="只生成 HTTP 段（申请证书前用），配合 --print-nginx")
+    parser.add_argument("--nginx-static", action="store_true",
+                        help="生成的 nginx 配置里由 nginx 直接托管前台静态（后端需 --no-static）")
     parser.add_argument("--ffmpeg-status", action="store_true",
                         help="打印 FFmpeg 探测结果后退出")
     parser.add_argument("--fetch-ffmpeg", action="store_true",
@@ -1892,7 +1956,8 @@ def main() -> int:
             print("缺少 --domain，例如：python admin.py --print-nginx --domain photos.example.com",
                   file=sys.stderr)
             return 2
-        print(nginx_config(args.domain, args.port, name=args.nginx_name, tls=not args.http_only))
+        print(nginx_config(args.domain, args.port, name=args.nginx_name,
+                           tls=not args.http_only, static=args.nginx_static))
         return 0
 
     external = args.host not in ("127.0.0.1", "localhost", "::1")

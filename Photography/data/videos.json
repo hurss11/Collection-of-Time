@@ -7,17 +7,17 @@
     "src": "assets/video/landscape-sunrise.mp4",
     "poster": "assets/video/posters/v-001.svg",
     "posterTime": 2,
-    "duration": 48,
-    "resolution": "3840 × 2160",
+    "duration": 4,
+    "resolution": "1280 × 720",
     "date": "2026-01-18 06:20:00",
     "location": "川西 · 折多山",
-    "description": "720 张照片合成的日出色温变化，跨度约 40 分钟。",
-    "tags": ["延时摄影", "日出", "山脉", "4K"],
+    "description": "720 张照片合成的日出色温变化，跨度约 40 分钟。（占位样片：把 assets/video/landscape-sunrise.mp4 换成你的成片，并同步这里的时长与分辨率）",
+    "tags": ["延时摄影", "日出", "山脉", "占位样片"],
     "exif": {
       "camera": "Sony α7 IV",
       "lens": "FE 16-35mm F2.8 GM",
-      "fps": "30 fps",
-      "codec": "H.265 / HEVC"
+      "fps": "25 fps",
+      "codec": "H.264"
     }
   },
   {
@@ -28,16 +28,16 @@
     "src": "assets/video/star-trails-timelapse.mp4",
     "poster": "assets/video/posters/v-002.svg",
     "posterTime": 3,
-    "duration": 32,
-    "resolution": "3840 × 2160",
+    "duration": 4,
+    "resolution": "1280 × 720",
     "date": "2024-12-30 22:00:00",
     "location": "内蒙古 · 乌兰哈达",
-    "description": "180 张 30 秒曝光的序列，后期用堆栈 + 逐帧延时呈现。",
-    "tags": ["延时摄影", "星轨", "星空", "4K"],
+    "description": "180 张 30 秒曝光的序列，后期用堆栈 + 逐帧延时呈现。（占位样片：把 assets/video/star-trails-timelapse.mp4 换成你的成片，并同步这里的时长与分辨率）",
+    "tags": ["延时摄影", "星轨", "星空", "占位样片"],
     "exif": {
       "camera": "Sony α7 III",
       "lens": "FE 14mm F1.8 GM",
-      "fps": "24 fps",
+      "fps": "25 fps",
       "codec": "H.264"
     }
   },
@@ -52,7 +52,7 @@
     "resolution": "3840 × 2160",
     "date": "2025-11-04 20:30:00",
     "location": "东京 · 涩谷",
-    "description": "外链嵌入示例：把 provider 设为 bilibili，src 填 BV 号或完整链接即可。",
+    "description": "外链嵌入示例：把 provider 改成 bilibili / youtube 等，src 填 BV 号或完整链接即可。当前 src 是占位值（BV1xxxxxxxxx），所以播放器会提示请求失败——换成真实链接就正常了。",
     "tags": ["街拍", "夜景", "步行视频", "外链"],
     "exif": {
       "camera": "DJI Osmo Pocket 3",

@@ -569,6 +569,7 @@ https_usage() {
   --no-certbot    只装反代配置，不动证书（证书由你自己的流程签发）
   --check-only    只跑线上自检，不改任何配置
   --insecure      自检时跳过证书校验（自签证书 / 内网用）
+  --static        nginx 直接托管前台静态（后端需用 --no-static 启动）
   --dry-run       只打印将要执行的步骤和配置内容，不改任何东西
 
 前提：dns 已把域名解析到本机，且 80 / 443 端口没有被别的服务占用。
@@ -648,7 +649,7 @@ install_nginx_conf() {
 
 https() {
   local domain="" email="" name="photography" port="${PORT:-8080}"
-  local dry=0 no_certbot=0 check_only=0 insecure=0
+  local dry=0 no_certbot=0 check_only=0 insecure=0 static=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -659,6 +660,7 @@ https() {
       --no-certbot) no_certbot=1; shift ;;
       --check-only) check_only=1; shift ;;
       --insecure)   insecure=1; shift ;;
+      --static)     static=1; shift ;;
       --dry-run)    dry=1; shift ;;
       -h|--help)    https_usage; return 0 ;;
       *)            err "未知参数：$1"; https_usage; return 2 ;;
@@ -682,8 +684,11 @@ https() {
   link_dir="$(nginx_link_dir)"
 
   local stage_http stage_full
+  local static_flag=()
+  [ "$static" = "1" ] && static_flag=(--nginx-static)
+
   stage_http="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" --http-only)" || return 1
-  stage_full="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port")" || return 1
+  stage_full="$(py admin.py --print-nginx --domain "$domain" --nginx-name "$name" --port "$port" "${static_flag[@]+"${static_flag[@]}"}")" || return 1
 
   if [ "$dry" = "1" ]; then
     step "1/4 预检（dry-run：不执行任何改动）"

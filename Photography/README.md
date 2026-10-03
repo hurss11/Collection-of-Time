@@ -385,6 +385,21 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 - 之所以不给这些文件加 `max-age`+`immutable`：封面、缩略图、视频都是**固定文件名就地替换**的
   （`assets/video/posters/<id>.jpg`），长缓存会让人看到旧图。若将来给文件名加内容指纹，
   就可以在反代层放心开一年长缓存。
+- 把静态文件交给 nginx 托管时（`./run.sh https --static` + 后端 `--no-static`），
+  nginx 用 `expires -1` 达到同样效果：命中 304 不传内容，改完立刻生效。
+  那一版配置会把前台需要的 CSP / HSTS 等安全头一并写到 `location` 里——
+  nginx 的 `add_header` **不与上层合并**，所以每个静态 location 都要重复声明。
+
+### 反向代理层的额外防护
+
+`./run.sh https` 生成的配置同时开了：
+
+| 项 | 值 | 作用 |
+| --- | --- | --- |
+| `limit_req`（`/api/public/*`） | 20 次/秒，burst 40，429 | 挡刷公开接口；正常浏览首屏只 2 个请求 |
+| `limit_req`（`/api/auth/login`） | 1 次/秒，burst 5，429 | 与应用层的「5 次失败锁 5 分钟」互补，防撞库 |
+| `gzip` | JS/CSS/JSON/SVG | 首屏体积约为原来三成 |
+| `client_max_body_size` | 512m | 与后端上传上限对齐，避免大视频被截断 |
 
 ### 服务器部署
 
@@ -623,6 +638,10 @@ graph TD
 出于安全考虑，该接口**只允许解析 `assets/img/photos/` 下的文件**。
 
 ## 新增一段视频
+
+> 仓库里带的两个 mp4（`landscape-sunrise.mp4`、`star-trails-timelapse.mp4`）是
+> **4 秒的占位样片**，只为让示例数据开箱即可播放；换成自己的成片时替换同名文件，
+> 并把 `data/videos.json` 里的 `duration` / `resolution` / `exif.fps` 改成实际值。
 
 1. 压缩导出后放进 `assets/video/`（原始素材放 `assets/video/originals/`，已被 git 忽略）。
 2. 生成封面：`python tools/make_posters.py --json`，把输出的片段粘进 `data/videos.json`。
