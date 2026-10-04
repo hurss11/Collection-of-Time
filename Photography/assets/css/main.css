@@ -499,9 +499,9 @@ section[id] { scroll-margin-top: 74px; }
   font-size: 12.5px;
   font-weight: 500;
   letter-spacing: 0.005em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 图注不截断：地点、机型、参数都在这两行里，裁掉就是信息丢失。
+     长标题在换行里排下来，行内图片靠 align-items 保持顶部对齐。 */
+  overflow-wrap: anywhere;
 }
 
 .shot__no {
@@ -519,9 +519,7 @@ section[id] { scroll-margin-top: 74px; }
   font-size: 11px;
   color: var(--text-mute);
   letter-spacing: 0.02em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- 覆盖在照片上的标记 ---------- */
