@@ -242,9 +242,69 @@ async function openEditor(collection, id, isNew) {
     title: `${isNew ? '新增' : '编辑'}${noun}${isNew ? '' : ` · ${id}`}`,
     hint: isNew ? '保存后由服务端分配 id 并写入数据文件' : '保存会立即写回数据文件',
     bodyHtml: renderForm(fields, values, albums, { netFetch: state.schema.netFetch !== false }),
-    onMount: (root) => wireCoverUpload(root),
+    onMount: (root) => {
+      wireCoverUpload(root);
+      wireSourceDetect(root);
+    },
     onSave: saveEditor,
   });
+}
+
+/**
+ * 「来源」按链接自动识别（表单里不再让作者手选）。
+ *
+ * 手选来源时最容易出的事就是填错：选了「本地视频文件」却贴了 B 站链接，后面的
+ * 自动抓封面、跳原站、资源检查就会全部对不上号（按钮点了报 400）。这里把识别交给
+ * 服务端（`POST /api/links/inspect`，与保存时同一套规则），前端只负责显示：
+ *   - 只读的「来源」文本框填上识别结果；
+ *   - 下面一行说明认成了什么、识别到的视频 ID、点卡片会去哪；
+ *   - 认不出来的来源抓不到封面，就把「自动获取封面」按钮停掉并说明原因。
+ */
+function wireSourceDetect(root) {
+  const target = $('[data-detected]', root);
+  if (!target) return;
+  const source = $(`[data-key="${target.dataset.detected || 'src'}"]`, root);
+  if (!source) return;
+
+  const note = $('[data-detected-note]', root);
+  const fetchButton = $('[data-fetch-thumb="poster"]', root);
+  let timer = 0;
+  let seen = null;
+
+  const paint = (payload) => {
+    target.value = payload.provider || '';
+    if (note) {
+      const label = payload.providerLabel || '认不出来';
+      const videoId = payload.videoId ? ` · ${payload.videoId}` : '';
+      note.textContent = `${label}${videoId}${payload.note ? ` —— ${payload.note}` : ''}`;
+    }
+    if (fetchButton) {
+      fetchButton.disabled = !payload.fetchable;
+      if (!payload.fetchable) {
+        fetchButton.title = payload.provider === 'file'
+          ? '本地视频不需要抓封面'
+          : '这个来源抓不到封面，请手动上传一张';
+      }
+    }
+  };
+
+  const inspect = async () => {
+    const src = source.value.trim();
+    if (src === seen) return;
+    seen = src;
+    try {
+      paint(await api.inspectLink(src));
+    } catch (error) {
+      if (note) note.textContent = `识别失败：${error.message}`;
+    }
+  };
+
+  source.addEventListener('input', () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(inspect, 250);
+  });
+  source.addEventListener('blur', inspect);
+  inspect();                       // 打开表单先认一次（编辑时把库里的来源显示出来）
 }
 
 /**

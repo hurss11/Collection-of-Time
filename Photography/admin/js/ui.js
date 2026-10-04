@@ -134,6 +134,16 @@ function fieldMarkup(field, value, albums, options) {
     return `<label class="field">${label}<select ${common}>${options}</select>${hint}</label>`;
   }
 
+  if (field.type === 'detected') {
+    // 「来源」不再手选：值由链接自动识别（见 app.js 的 wireSourceDetect），
+    // 但仍是 data-key 控件，readForm 会一起提交（服务端以自己识别的结果为准）。
+    const from = escapeHtml(field.from || 'src');
+    return `<label class="field">${label}
+      <input ${common} type="text" readonly data-detected="${from}" value="${escapeHtml(value ?? '')}"
+        placeholder="根据链接自动识别" />
+      <span class="muted" data-detected-note>${escapeHtml(field.hint || '')}</span></label>`;
+  }
+
   if (field.type === 'textarea') {
     return `<label class="field field--wide">${label}<textarea ${common} rows="2">${escapeHtml(value ?? '')}</textarea>${hint}</label>`;
   }

@@ -60,9 +60,10 @@ FIELDS: dict[str, list[dict]] = {
     "videos": [
         {"key": "title", "label": "标题", "type": "text", "required": True},
         {"key": "album", "label": "相册", "type": "album"},
-        {"key": "provider", "label": "来源", "type": "select", "options": PROVIDERS},
+        {"key": "provider", "label": "来源", "type": "detected", "from": "src",
+         "hint": "按上面的链接自动识别（本地文件 / 哔哩哔哩 / YouTube / Vimeo / 其它外链），不用手选"},
         {"key": "src", "label": "文件路径 / 视频链接 / BV 号", "type": "text", "mono": True,
-         "placeholder": "assets/video/xxx.mp4 或 BV1xxxxxxxxx"},
+         "placeholder": "assets/video/xxx.mp4 或 BV1xxxxxxxxx 或 https://…"},
         {"key": "poster", "label": "封面图", "type": "text", "mono": True, "upload": "poster",
          "hint": "外链视频必填：卡片上显示的就是这张图（留空会尝试自动获取）。也可以点旁边的按钮上传一张"},
         {"key": "posterTime", "label": "抓帧时间（秒）", "type": "number"},
@@ -163,9 +164,10 @@ def normalize_submission(collection: str, payload: dict) -> dict:
 
         item[key] = text(value)
 
-    # 视频没有 provider 时按本地文件处理（schema 里有这个字段，但可能被清空）
-    if collection == "videos" and not text(item.get("provider")):
-        item["provider"] = "file"
+    # 视频的「来源」不由作者选：按链接自动识别（填错来源会让自动抓封面、跳原站、
+    # 资源检查这些后续逻辑全部对不上号）。认不出来时（空、怪协议）按本地文件处理。
+    if collection == "videos":
+        item["provider"] = query.detect_provider(text(item.get("src"))) or "file"
     return item
 
 
@@ -238,13 +240,14 @@ def validate(collection: str, item: dict) -> list[dict[str, str]]:
 
     if collection == "videos":
         provider = text(item.get("provider")) or "file"
+        src = text(item.get("src"))
         if provider not in PROVIDER_VALUES:
             errors.append({"field": "provider", "message": f"未知的来源：{provider}"})
-        elif provider == "file":
-            require("src", "本地视频必须填写文件路径")
-        else:
+        if not src:
+            # 来源是按链接认的，没有链接就认不出来 —— 所以这里只说「要填链接」
+            require("src", "必须填写文件路径、视频链接或视频 ID（来源会按它自动识别）")
+        elif provider != "file":
             # 外链少了 src 会存出一条「点开什么都没有」的假视频（前台只能显示未配置 src）
-            require("src", "外链视频必须填写视频链接或 BV 号")
             require("poster", "外链视频必须填写封面图（站内不播放，卡片上显示的就是这张图）")
 
     return errors

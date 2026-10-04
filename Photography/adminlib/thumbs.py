@@ -45,6 +45,8 @@ MAX_HOPS = 3
 
 # 允许访问的「元信息」接口（视频还在不在、缩略图地址）
 META_HOSTS = ("api.bilibili.com", "vimeo.com", "www.youtube.com")
+# 能抓到封面的来源（「其它外链」各站规则不统一，本地文件不需要）
+FETCHABLE_PROVIDERS = ("youtube", "bilibili", "vimeo")
 # 允许访问的图片域名（前导点 = 按域名边界做后缀匹配）
 IMAGE_HOSTS = ("i.ytimg.com", ".hdslb.com", ".vimeocdn.com")
 # 自检用：每个白名单项挑一个具体主机来探测（我们只可能连这些）

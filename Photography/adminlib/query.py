@@ -51,7 +51,7 @@ PROVIDER_LABELS = {
     "youtube": "YouTube",
     "bilibili": "哔哩哔哩",
     "vimeo": "Vimeo",
-    "embed": "外部嵌入",
+    "embed": "其它外链",
 }
 
 PUBLIC_SORTS = [
@@ -194,6 +194,144 @@ def video_id(provider: str, raw: str) -> str:
     if re.fullmatch(r"[\w-]{6,}", src):
         return src
     return ""
+
+
+# 「来源」是按链接自动认出来的，作者不用手选：填错来源会让后面的逻辑（自动抓封面、
+# 跳原站、资源检查）全部对不上号。认得的站与别名（短链 b23.tv 也算 B 站）。
+PROVIDER_HOSTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("bilibili", ("bilibili.com", "b23.tv", "acg.tv")),
+    ("youtube", ("youtube.com", "youtube-nocookie.com", "youtu.be")),
+    ("vimeo", ("vimeo.com",)),
+)
+
+# 站内直接播放的文件后缀（自己托管的直链 mp4 也算「本地视频」，用 <video> 播）
+VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".ogv", ".ts")
+
+# 认出来但做不了服务商特有能力时的说明（现在是 B 站短链：解跳转要联网，我们不做出网站外请求）
+_SHORT_LINK_HINT = {
+    "b23.tv": "这是哔哩哔哩的短链（b23.tv）：服务端不去解跳转，自动抓封面与链接检查都用不了，"
+              "请换成完整的视频链接或直接填 BV 号",
+}
+
+_DOMAIN_RE = re.compile(r"^[\w-]+(?:\.[\w-]+)+$")
+_SUFFIX_RE = re.compile(r"(\.[A-Za-z0-9]{1,5})$")
+_SCHEME_RE = re.compile(r"^([A-Za-z][\w+.-]*):")
+
+
+def _scheme_of(src: str) -> str:
+    """不认识的协议要挡掉（`javascript:`、`data:`）；单个字母当盘符，不当作协议。"""
+    if "://" in src:
+        try:
+            return urllib.parse.urlsplit(src).scheme.lower()
+        except ValueError:
+            return ""
+    matched = _SCHEME_RE.match(src)
+    if not matched or len(matched.group(1)) == 1:      # `C:\video.mp4` 这种盘符不算协议
+        return ""
+    return matched.group(1).lower()
+
+
+def _host_of(src: str) -> str:
+    """取链接的主机名；`www.bilibili.com/video/...` 这种没写 scheme 的也认。
+
+    只认「像域名」的（至少一个点），否则 `assets/video/x.mp4` 的 `assets` 会被当成主机。
+    """
+    candidate = src if "://" in src else f"//{src.lstrip('/')}"
+    try:
+        host = (urllib.parse.urlsplit(candidate).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    return host if _DOMAIN_RE.match(host) else ""
+
+
+def _suffix_of(src: str) -> str:
+    path = urllib.parse.urlsplit(src).path if "://" in src else src
+    matched = _SUFFIX_RE.search(path.split("?")[0].split("#")[0])
+    return matched.group(1).lower() if matched else ""
+
+
+def _looks_like_path(src: str) -> bool:
+    """不带域名的写法：有没有斜杠 / 是不是相对路径（`assets/video/...`、`./x.mp4`）。"""
+    return "/" in src or src.startswith(".")
+
+
+def detect_provider(raw: str) -> str:
+    """看链接就认出是哪个站，认不出来时退回 `file` / `embed`（不用作者手选来源）。
+
+    规则（与 `video_id()` 的识别能力对齐，认得出什么就报什么）：
+
+    | 填的内容 | 认成 |
+    | --- | --- |
+    | 空 / 不认识的协议（`javascript:`、`data:`） | `""`（等作者改） |
+    | `assets/video/x.mp4`、`https://cdn.example.com/x.mp4` | `file` |
+    | 含 `bilibili.com` / `b23.tv` 的链接、`BV...`、`av123` | `bilibili` |
+    | 含 `youtube.com` / `youtu.be` 的链接、11 位 ID | `youtube` |
+    | 含 `vimeo.com` 的链接、纯数字 ID | `vimeo` |
+    | 其它链接（含没写 scheme 的域名） | `embed`（其它外链） |
+    | 其它像路径的文本 | `file` |
+    """
+    src = text(raw)
+    if not src:
+        return ""
+    scheme = _scheme_of(src)
+    if scheme and scheme not in ("http", "https"):
+        return ""
+
+    host = _host_of(src)
+    if "://" in src:
+        # 明确写了协议：这就是个链接（主机名认不认得出都算外链，不会当成文件路径）
+        if _suffix_of(src) in VIDEO_SUFFIXES:
+            return "file"                      # 自己托管的直链：站内直接播
+        for provider, hosts in PROVIDER_HOSTS:
+            if host and any(host == entry or host.endswith(f".{entry}") for entry in hosts):
+                return provider
+        return "embed"
+
+    if host:
+        # 没写协议但看得出域名（`www.bilibili.com/video/...`）
+        if _suffix_of(src) in VIDEO_SUFFIXES:
+            return "file"
+        for provider, hosts in PROVIDER_HOSTS:
+            if any(host == entry or host.endswith(f".{entry}") for entry in hosts):
+                return provider
+        return "embed"
+
+    # 既没有协议也没有域名：只可能是裸 ID 或本地路径
+    if re.fullmatch(r"BV[\w]{6,}", src, re.I) or re.fullmatch(r"av\d+", src, re.I):
+        return "bilibili"
+    if _suffix_of(src) in VIDEO_SUFFIXES or _looks_like_path(src):
+        return "file"
+    if re.fullmatch(r"[\w-]{11}", src):        # YouTube 的 ID 正好 11 位
+        return "youtube"
+    if re.fullmatch(r"\d{5,}", src):           # Vimeo 的 ID 是纯数字
+        return "vimeo"
+    return "file"
+
+
+def describe_source(raw: str) -> dict:
+    """给后台表单用的「这条链接会被当成什么」：来源、识别到的 ID、点开会去哪。"""
+    src = text(raw)
+    provider = detect_provider(src)
+    host = _host_of(src)
+    note = _SHORT_LINK_HINT.get(host, "")
+    if not src:
+        note = "填上文件路径、视频链接或 BV 号，来源会自动识别"
+    elif not provider:
+        note = "认不出这是什么：请填文件路径、视频链接或视频 ID"
+    elif provider == "file":
+        note = "按本地文件处理：站内用播放器直接播放，不需要封面"
+    elif provider == "embed" and not note:
+        note = "认不出是哪个站，按「其它外链」处理：封面要自己上传，点卡片会跳到这个地址"
+    elif provider == "bilibili" and not _SHORT_LINK_HINT.get(host):
+        note = "点卡片会跳到 B 站视频页"
+    return {
+        "src": src,
+        "provider": provider,
+        "providerLabel": provider_label(provider) if provider else "",
+        "videoId": video_id(provider, src) if provider not in ("", "file", "embed") else "",
+        "watchUrl": watch_url(provider, src) if provider and provider != "file" else "",
+        "note": note,
+    }
 
 
 def embed_url(provider: str, raw: str) -> str:

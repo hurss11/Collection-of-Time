@@ -325,6 +325,7 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | `POST /api/assets/poster` | 上传一张封面素材（`file`，仅图片），返回 `{path, url}` —— 给「新增视频」用：条目还没有 id，先拿路径再回填表单 |
 | `POST /api/assets/thumb` | 按 `{provider, src}` 自动抓取外链视频封面（仅白名单域名、见「外链封面的自动获取」）；`--no-net-fetch` 时返回 400 |
 | `POST /api/assets/check-links` | 批量检查所有外链视频「还在不在」，返回 `counts` 与逐条 `results`，结果写进 `.run/link-status.json`（见「外链『还在不在』」）；`--no-net-fetch` 时返回 400 |
+| `POST /api/links/inspect` | `{src}` → 按链接识别「来源」：`{provider, providerLabel, videoId, watchUrl, note, fetchable}`。后台表单用它实时显示来源（只读），保存时服务端再认一次 |
 | `GET /api/upload/options` | 上传限制（单文件 / 单批上限）、可选相册、允许的扩展名 |
 | `GET /api/state` | 概览：计数、工具状态、完整性体检、备份列表（含 `sizeText`）、操作记录 |
 | `GET /api/data/{集合}`、`PUT /api/data/{集合}`、`POST /api/data/{集合}` | 兼容保留的集合读写（整表替换 / 单条覆盖） |
@@ -669,7 +670,7 @@ graph TD
 | `id` | string | 唯一标识 |
 | `title` | string | 标题 |
 | `album` | string | 所属相册 id（与照片共用同一套相册） |
-| `provider` | string | `file`（本地文件）\| `youtube` \| `bilibili` \| `vimeo` \| `embed` |
+| `provider` | string | **由服务端按 `src` 自动识别**（`file` / `bilibili` / `youtube` / `vimeo` / `embed`），表单里不用手选；提交什么都会被识别结果覆盖 |
 | `src` | string | `provider: "file"` 时为文件路径；否则填视频链接或视频 ID（外链必填） |
 | `poster` | string | 封面图路径（外链视频必填；本地视频留空时播放器会退而显示第一帧，网格卡片仍建议补上） |
 | `posterTime` | number | 运行时抓帧的时间点（秒），默认 `0` = 第一帧 |
@@ -678,8 +679,22 @@ graph TD
 | `date` / `location` / `description` / `tags` | — | 与照片同义，参与搜索与筛选 |
 | `exif` | object | 视频参数，常用 `camera`、`lens`、`fps`、`codec` |
 
-`provider` 为外链时会把链接（或裸 ID）换算成一个**原站观看页地址**（`watchUrl`），
-站内不播放，点卡片就跳过去。以下写法都支持：
+**`provider` 是算出来的，不是填出来的**：后台表单里的「来源」是只读的，按你在
+「文件路径 / 视频链接 / BV 号」里填的 `src` 实时识别（`POST /api/links/inspect`），
+保存时服务端再认一次并以此为准。手选来源最容易出的事就是选错 —— 选了「本地视频文件」
+却贴了 B 站链接，后面的自动抓封面、跳原站、资源检查就会全部对不上号。
+
+| 填的 `src` | 识别成 | 说明 |
+| --- | --- | --- |
+| `assets/video/x.mp4`、`https://cdn.example.com/x.mp4` | `file` | 站内用 `<video>` 播；自己托管的直链也算 |
+| `https://www.bilibili.com/video/BV…`、`BV…`、`av…`、`b23.tv/…` | `bilibili` | |
+| `https://www.youtube.com/watch?v=…`、`youtu.be/…`、`…/shorts/…`、11 位 ID | `youtube` | |
+| `https://vimeo.com/…`、`player.vimeo.com/video/…`、纯数字 ID | `vimeo` | |
+| 其它链接（含不认识的域名） | `embed` | 「其它外链」：封面要自己传 |
+| `javascript:` / `data:` / 其它怪协议 | 认不出 | 保存会拦下并提示重填 |
+
+识别成外链（`bilibili` / `youtube` / `vimeo` / `embed`）时会把链接（或裸 ID）换算成一个
+**原站观看页地址**（`watchUrl`），站内不播放，点卡片就跳过去。以下写法都支持：
 
 | 填写的 `src` | 点卡片跳到哪里 |
 | --- | --- |
@@ -693,22 +708,25 @@ graph TD
 > 站内不会去加载它，只做一次 `http`/`https` 校验（`javascript:` 之类写不进 `href`）。
 >
 > 本地视频（`provider: "file"`）在站内用原生 `<video controls>` 播放，不受此影响。
+> B 站短链（`b23.tv/…`）认得出是 B 站，但解跳转要联网，所以抓封面与链接检查用不了 ——
+> 表单会提示换成完整链接或直接填 BV 号。
 
 ### 发一条外链视频（后台操作）
 
 外链不走「上传」页（那个页面只收本地文件），走**「视频」→ ＋ 新增视频**：
 
-1. **来源** 选 `哔哩哔哩` / `YouTube` / `Vimeo` / `其它外链`；
-2. **「文件路径 / 视频链接 / BV 号」** 填整条链接或裸 ID（上面的换算表）；
-3. **封面图**：外链必填（站内不播放，卡片上显示的就是这张图）。两种填法：
+1. **「文件路径 / 视频链接 / BV 号」** 填整条链接或裸 ID（换算表见上）；
+   下面的 **「来源」会自动识别**（只读，不用手选）—— 认成什么、识别到的 ID、
+   点卡片会去哪，都在那一行说明里；
+2. **封面图**：外链必填（站内不播放，卡片上显示的就是这张图）。两种填法：
    - 点 **「上传图片…」** 选一张本地图片；
    - 点 **「自动获取封面」** 让服务端去服务商那里取缩略图（见下节），
      或者**干脆留空直接保存** —— 保存时也会自动抓，抓到了就写进条目；
-4. 保存。列表里每行的 **「封面」** 按钮随时可以换封面：外链可以「上传封面图片」，
+3. 保存。列表里每行的 **「封面」** 按钮随时可以换封面：外链可以「上传封面图片」，
    点「抓取该帧」会被明确拒绝（`外链视频无法抓帧，请上传一张封面图片`）。
 
 外链与封面**缺一不可**：少了链接会存出一条点开什么都没有的假视频，所以校验会直接拦下
-（`外链视频必须填写视频链接或 BV 号`）。封面自动抓取失败时，报错会带上原因，例如
+（`必须填写文件路径、视频链接或视频 ID`）。封面自动抓取失败时，报错会带上原因，例如
 `外链视频必须填写封面图…（自动抓取失败：抓取超时（6 秒预算已用完）…）`。
 
 保存时还会顺手问一次服务商「这个视频还在吗」（见下下节）：接口明确说不存在就拦下
@@ -716,7 +734,8 @@ graph TD
 
 ### 外链封面的自动获取（`adminlib/thumbs.py`）
 
-`POST /api/assets/thumb` 按 `provider` + 链接取缩略图，识别规则与播放地址一致：
+`POST /api/assets/thumb` 按 `provider` + 链接取缩略图（`provider` 可以省略：省略时按链接
+自动识别，识别成已知服务商时也以识别结果为准，免得来源填错就点了没反应）：
 
 | 来源 | 怎么取 |
 | --- | --- |

@@ -882,6 +882,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.api_check_links()
             return
 
+        if head == "links" and method == "POST" and len(segments) >= 2 and segments[1] == "inspect":
+            self.api_link_inspect()
+            return
+
         if head == "item" and method == "GET":
             self.api_item(segments[1:])
             return
@@ -1880,8 +1884,24 @@ class Handler(SimpleHTTPRequestHandler):
         remember("上传封面素材", relative)
         self.send_json({"ok": True, "path": relative, "url": f"/{relative}", "bytes": target.stat().st_size})
 
+    def api_link_inspect(self) -> None:
+        """按链接自动识别「来源」（`POST /api/links/inspect`，JSON `{src}`）。
+
+        后台表单里「来源」不再让作者手选 —— 填上文件路径 / 链接 / ID，前端调这里拿到
+        认出来的站、识别到的视频 ID 与「点开会去哪」。保存时服务端还会再认一次，以服务端为准。
+        """
+        payload = self.read_json()
+        src = query.text((payload or {}).get("src"))
+        info = query.describe_source(src)
+        info["fetchable"] = bool(NET_FETCH and info["provider"] in thumbs.FETCHABLE_PROVIDERS)
+        info["netFetch"] = NET_FETCH
+        self.send_json({"ok": True, **info})
+
     def api_asset_thumb(self) -> None:
-        """校验外链并自动抓取封面（`POST /api/assets/thumb`，JSON `{provider, src}`）。
+        """校验外链并自动抓取封面（`POST /api/assets/thumb`，JSON `{provider?, src}`）。
+
+        `provider` 可以省略：省略或填了空值就按链接自动识别（与表单同一套规则，
+        见 `query.detect_provider`），免得手选的来源对不上号导致抓不了。
 
         沿用「先拿路径、随表单保存」的用法（同 api_asset_poster）。识别与出网的边界都在
         `adminlib/thumbs.py` 里：用户填的链接**不会被请求**，只会按 provider 拼出官方接口或
@@ -1890,8 +1910,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not NET_FETCH:
             raise ApiError("服务端已关闭出网抓取（启动参数 --no-net-fetch），请手动上传封面")
         payload = self.read_json()
-        provider = query.text(payload.get("provider"))
         src = query.text(payload.get("src"))
+        # 表单不再手选来源，所以以「按链接识别」为准 —— 但只在识别成**已知服务商**时才覆盖
+        # 显式传来的 provider（免得填错来源时点了没反应）；识别成其它外链或本地文件时，
+        # 仍然按调用方给的 provider 走，这样错误提示才是它真正想做的事。
+        detected = query.detect_provider(src)
+        provider = detected if detected in thumbs.FETCHABLE_PROVIDERS else query.text(payload.get("provider"))
 
         try:
             cover = thumbs.fetch_cover(provider, src)
