@@ -2,9 +2,11 @@
 
 服务器目录里混着两类东西：
 
-- **代码**：仓库跟踪、应该随新版本整体替换 —— 由 `CODE_PATHS` 划定范围；
-- **本地状态**：`data/*.json`、`assets/` 下的上传内容、`admin.config.json`、
-  `bin/`、`.run/` —— 这是站点的真实内容，任何更新都不允许覆盖它。
+- **代码**：仓库跟踪、应该随新版本整体替换 —— 由 `CODE_PATHS` 划定范围。注意
+  `assets/css`、`assets/js` 也在这里面：`assets/` 是混合目录，别把它整个当内容；
+- **本地状态**：`data/*.json`、`admin.config.json`、`bin/`、`.run/`，以及 `assets/` 里
+  **上传的内容**（`assets/img/photos/**`、`assets/video/posters/**`、上传的视频文件）
+  —— 这是站点的真实内容，任何更新都不允许覆盖它。
 
 所以更新不是 `git pull`，而是「**按路径**把代码换过去」：
 

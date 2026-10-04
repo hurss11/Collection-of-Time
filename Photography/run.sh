@@ -477,6 +477,50 @@ PY
     fi
   fi
 
+  # 代码版本：assets/ 里混着上游代码（css/js/README/示例媒体）与上传内容，
+  # 用旧快照把整棵 assets/ 盖回来，就会留下「新后端 + 旧前端 JS」的混合体 —— 新功能看着像没生效。
+  if ! command -v git >/dev/null 2>&1; then
+    warn "代码版本 : 没有 git，无法核对上游代码是否被本地改动"
+  elif ! git rev-parse --git-dir >/dev/null 2>&1; then
+    warn "代码版本 : 不是 git 检出，无法核对上游代码是否被本地改动"
+    info "           就地接管一次（不覆盖 data/、上传内容、admin.config.json），之后即可自检："
+    info "           ./run.sh adopt --repo <仓库地址>"
+  else
+    local dirty_code=() status_out line path prefix f
+    # porcelain 输出的前缀随环境而异（有的 git 给相对 cwd 的路径，有的给相对仓库根的），
+    # 统一按「cwd 相对仓库根」的前缀削掉一层，后面的匹配规则才不用管 cwd 在哪儿
+    prefix="$(git rev-parse --show-prefix 2>/dev/null)"
+    status_out="$(git status --porcelain 2>/dev/null)"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      path="${line:3}"
+      case "$path" in
+        *" -> "*) path="${path##* -> }" ;;
+      esac
+      if [ -n "$prefix" ]; then
+        case "$path" in
+          "$prefix"*) path="${path#"$prefix"}" ;;
+        esac
+      fi
+      case "$path" in
+        # 站点内容：改了是正常的（data/ 由后台写入；上传的照片视频封面本来就不在 git 里）
+        data/*|assets/img/photos/*|assets/video/posters/*|assets/video/originals/*|assets/video/raw/*) ;;
+        # 上游代码（与 adminlib/autoupdate.py 的 CODE_PATHS 同源）
+        admin.py|serve.py|run.sh|index.html|favicon.svg|README.md|DEPLOY.md|admin/*|adminlib/*|tools/*|assets/css/*|assets/js/*|assets/video/README.md)
+          dirty_code+=("$path") ;;
+      esac
+    done <<< "$status_out"
+    if [ "${#dirty_code[@]}" -eq 0 ]; then
+      ok "代码版本 : 上游代码与 git 里的一致"
+    else
+      warn "代码版本 : 有 ${#dirty_code[@]} 个上游代码文件被本地改动过"
+      for f in "${dirty_code[@]}"; do info "           $f"; done
+      info "           如果这不是你正在改的代码（例如刚用旧快照还原过 assets/），"
+      info "           页面上会是「新后端 + 旧前端 JS」的混合体，表现成新功能没生效。"
+      info "           还原成 git 里的版本： git checkout -- ${dirty_code[*]}"
+    fi
+  fi
+
   # FFmpeg
   local state
   if state="$(ffmpeg_state)"; then
@@ -591,7 +635,23 @@ AUTOUPDATE_LOCK="$RUN_DIR/autoupdate.lock"
 
 au() { py -m adminlib.autoupdate "$@"; }
 
-# 从 JSON 里取一个字段（嵌套用点号）
+# 把 JSON 里的字符串数组逐行打印，并剥掉 git status 的状态列（` M path` → `path`）
+json_paths() {
+  py -c '
+import json, re, sys
+try:
+    data = json.loads(sys.argv[1])
+except ValueError:
+    data = []
+for key in sys.argv[2].split("."):
+    data = data.get(key) if isinstance(data, dict) else None
+for item in (data or []):
+    line = str(item)
+    match = re.match(r"^[ MADRCU?!]{1,2}\s(.*)$", line)
+    print((match.group(1) if match else line).strip())
+' "${1:-{\}}" "$2"
+}
+
 json_get() {
   py -c '
 import json, sys
@@ -714,6 +774,15 @@ _update_body() {
         info "按 --accept-authors 放行新作者：$(json_get "$inspected" new_authors)"
       else
         err "不能自动更新：$(json_get "$inspected" blockers)"
+        # 代码文件被本地改过：多半是「用旧快照把 assets/ 盖回来」留下的旧前端，
+        # 这时光更新没用（本地改动会被覆盖），先把话说明白
+        if [ "$(json_get "$inspected" dirty_code)" != "[]" ]; then
+          info "           本地改过的代码文件（会被新版本覆盖）："
+          json_paths "$inspected" dirty_code | sed 's/^/             /'
+          info "           先还原成 git 里的版本再更新： git checkout -- <上面的文件>"
+          info "           确实要丢弃这些本地改动（以远端为准）： ./run.sh update --force"
+          info "           只想核对现在的状态： ./run.sh doctor（看「代码版本」一项）"
+        fi
         return 1
       fi
       ;;
@@ -1588,7 +1657,7 @@ Photography 一键运行脚本
   ./run.sh restart         重启
   ./run.sh status          查看运行状态
   ./run.sh logs [-f]       查看日志（-f 持续跟踪）
-  ./run.sh doctor          环境自检（Python / FFmpeg / 权限 / JSON / 端口）
+  ./run.sh doctor          环境自检（Python / FFmpeg / 权限 / JSON / 端口 / 上游代码是否被本地改动）
   ./run.sh install-ffmpeg  下载 FFmpeg 静态构建到 bin/（随项目打包到服务器）
   ./run.sh ffmpeg-status   查看当前使用的是哪个 ffmpeg
   ./run.sh net-check       自检：外链封面抓取要用的域名能不能连上（出网问题一眼看清）
@@ -1610,6 +1679,8 @@ Photography 一键运行脚本
   ./run.sh update --force             正在上传也重启 / 允许覆盖本地改过的代码
   ./run.sh update --accept-authors    这次提交的作者不在白名单里时，显式放行并记住
   ./run.sh adopt --repo URL           用迁移包部署的目录先接管成 git 检出
+  ./run.sh doctor                     顺带核对「上游代码有没有被本地改动过」（被旧快照盖回
+                                      assets/css、assets/js 时会指出来，并给出还原命令）
   sudo ./run.sh update-check on       可选：每 5 分钟检查一次并提醒（只写日志/状态，
                                       绝不自动换代码、绝不重启）；--interval 15min 可调
   sudo ./run.sh update-check off      关掉定时检查（代码与数据都不动）

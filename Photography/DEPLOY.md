@@ -454,17 +454,46 @@ python tools/fetch_ffmpeg.py --platform linux-arm64 --keep-archive
 
 ## 8. 升级
 
-**代码与数据是分开的**，升级只替换代码，不要动 `data/` 和 `assets/`。
+升级只替换**代码**，站点内容一个字节都不动。但「哪些算代码」要说清，因为它出过一次事故：
+
+`assets/` 是**混合目录**：既有上游代码（`assets/css/**`、`assets/js/**`、`assets/video/README.md`、
+示例占位图与占位样片），也有你上传的内容（照片、视频、封面）。所以「升级时保留整棵 `assets/`」
+是**错的** —— 用旧快照把 `assets/` 整棵盖回来，会把 `main.css`、`app.js` 这类前端文件退回旧版本，
+留下「新后端 + 旧前端 JS」的混合体：新功能看着像没生效，其实是旧 JS 把新逻辑抵消了。
+
+判断标准只看一条 —— **这个文件在 git 里有没有被跟踪**：
+
+| 类别 | 路径 | 升级时 |
+| --- | --- | --- |
+| 代码（git 跟踪，含示例占位媒体） | `admin.py`、`serve.py`、`run.sh`、`index.html`、`favicon.svg`、`admin/`、`adminlib/`、`tools/`、`assets/css/`、`assets/js/`、`*.md` | **用新版本覆盖** |
+| 站点内容 | `data/`（含 `.backups/`、`.tmp/`）、`admin.config.json`、`assets/img/photos/**`、上传的 `assets/video/*.mp4`、`assets/video/posters/**`、`bin/`、`.run/` | **一个字节都别动** |
+
+> `data/*.json` 是特例：仓库里有示例版本，但**服务器上的那份才是真的**，所以更新路径
+> （`adminlib/autoupdate.py` 的 `CODE_PATHS`）特意不含它。
+>
+> 一条命令列出全部代码路径，便于写脚本时对照：`git ls-files | head`（`git ls-files assets` 看 `assets/` 里的）。
+
+**还原 / 覆盖之后一定要核对一次**：`./run.sh doctor` 的「代码版本」一项会指出被本地改动过的
+上游代码文件（并给出还原命令），`git status --short` 里应该只剩 `data/` 与上传内容。
 
 ### 8.1 手动升级（迁移包）
 
 ```bash
 ./run.sh stop
 cp -a data data.bak.$(date +%Y%m%d)          # 保险起见先备份数据
-# 用新包覆盖代码文件（保留 data/、assets/、admin.config.json）
-rsync -av --exclude data/ --exclude assets/ --exclude admin.config.json \
+
+# 新包解压到 /tmp/新包目录 后逐文件覆盖上去。
+# 注意：**不要**用 --exclude assets/ —— assets/ 里 css/js/README/示例媒体是需要被覆盖的那一半。
+# 你上传的照片与视频不在包里，rsync 不加 --delete 就不会碰它们；
+# 明确排除的只是「服务器上的本地状态」与「上传内容所在的目录」。
+rsync -av \
+      --exclude 'data/' --exclude 'admin.config.json' --exclude '.run/' --exclude 'bin/' \
+      --exclude 'assets/img/photos/' --exclude 'assets/video/posters/' \
       /tmp/新包目录/ ./
-./run.sh doctor && ./run.sh start
+
+./run.sh doctor        # 看「代码版本」一项：不应有上游代码被本地改动
+git status --short     # 有 .git 的话：只应剩下 data/ 与上传内容
+./run.sh start
 ```
 
 > 后台本身在每次保存前都会自动备份到 `data/.backups/`（保留最近 40 份），
@@ -516,8 +545,10 @@ git log -1 --format=%ae          # 确认是你自己的邮箱
 
 **其它情况**：
 
-- 服务器上有人手改过代码，更新会拒绝覆盖，提示「代码文件被本地改过」；
-  确认要放弃那些改动就用 `./run.sh update --force`。
+- 服务器上有人手改过代码，更新会拒绝覆盖，提示「代码文件被本地改过」；命令里会列出
+  具体文件。先判断一下：如果是**用旧快照还原过 `assets/`**，那不是你的改动，而是被盖回去的
+  旧版本（表现成「新后端 + 旧前端 JS」，新功能看着没生效）—— 用 `git checkout -- <文件…>`
+  还原后再更新；确实要放弃自己的改动才用 `./run.sh update --force`。
 - 正在上传时更新会推迟，急的话 `./run.sh update --force`。
 - 出问题了想回上一个版本：`python3 -m adminlib.autoupdate rollback`，然后 `./run.sh restart`。
 - 想手动接管所有步骤（完全不用这套逻辑）：按 8.1 的 rsync 覆盖法。
@@ -582,6 +613,7 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 上传图片没缩略图 | FFmpeg 未就绪，看 `./run.sh ffmpeg-status`；不影响上传本身 |
 | FFmpeg 报架构不对 | 见上面第 7 节，重新装对应平台的构建 |
 | 数据文件损坏 | 从 `data/.backups/` 里挑一份恢复，或后台「备份」页回滚 |
+| **升级/还原后新功能没生效**，前端行为像旧版 | `assets/` 被整棵快照盖回去了（新后端 + 旧前端 JS）。`./run.sh doctor` 的「代码版本」会列出被改动的上游文件与还原命令：`git checkout -- <文件…>`；只有迁移包没有 `.git` 时，重新用新包覆盖一次 `assets/css/` 与 `assets/js/` |
 | 站点资源 404 但后台能用 | 从**项目目录**里启动（`cd` 进项目再 `./run.sh start`） |
 | 服务被 OOM 杀掉 / 整机卡死 | 见下面「内存与 OOM」 |
 | 上传卡在 100% 不起作用 | 服务端在处理（读 EXIF / 生成缩略图与封面），大文件会花几秒；`journalctl -u photography-admin -f` 能看到耗时 |

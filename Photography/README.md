@@ -48,7 +48,7 @@ chmod +x run.sh          # 首次
 | `./run.sh stop` / `restart` | 停止 / 重启 |
 | `./run.sh status` | 运行状态、运行时长、FFmpeg 来源、数据条数 |
 | `./run.sh logs [-f]` | 查看日志（`-f` 持续跟踪） |
-| `./run.sh doctor` | 环境自检：Python 版本、必需文件、写权限、JSON 合法性、端口占用 |
+| `./run.sh doctor` | 环境自检：Python 版本、必需文件、写权限、JSON 合法性、上游代码是否被本地改动、端口占用 |
 | `./run.sh net-check` | 自检外链封面抓取要用的域名能否连上（出网问题一眼看清） |
 | `./run.sh link-check` | 检查所有外链视频「还在不在」，结果写进 `.run/link-status.json`（后台「检查外链」按钮同款） |
 | `./run.sh install-ffmpeg` | 下载 FFmpeg 静态构建到 `bin/`（可透传 `--check` / `--file` / `--url` 等） |
@@ -56,7 +56,7 @@ chmod +x run.sh          # 首次
 | `./run.sh systemd [--install]` | 生成 systemd 单元（加 `--install` 需 root，直接写入并启用） |
 | `./run.sh update` | **手动**更新代码：拉取 → 只换代码路径 → 重启 → 健康检查，失败自动回滚（`--check` 只检查不改动） |
 | `./run.sh update-check on\|off\|status` | 可选：定时检查有没有新代码，**只提醒不执行**；详见 [DEPLOY.md「在服务器上更新代码」](./DEPLOY.md) |
-| `./run.sh adopt --repo URL` | 把迁移包部署的目录就地接管成 git 检出（更新需要它；不覆盖 `data/`、`assets/`、`admin.config.json`） |
+| `./run.sh adopt --repo URL` | 把迁移包部署的目录就地接管成 git 检出（更新需要它；不动 `data/`、上传内容与 `admin.config.json`，`assets/css` `assets/js` 这类代码会被对齐到远端） |
 
 启动参数可覆盖默认值（也支持环境变量）：
 
