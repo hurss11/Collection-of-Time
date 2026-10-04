@@ -15,6 +15,11 @@ const API_BASE = (
   document.querySelector('meta[name="api-base"]')?.content || ''
 ).replace(/\/+$/, '');
 
+/** 接口根地址（空串 = 同源）。给需要自己发请求的模块用（见 cover.js）。 */
+export function apiBase() {
+  return API_BASE;
+}
+
 async function getJson(path, params) {
   const query = new URLSearchParams();
   Object.entries(params || {}).forEach(([key, value]) => {

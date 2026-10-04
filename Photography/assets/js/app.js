@@ -18,6 +18,7 @@ import {
   syncAlbums,
   syncChips,
   resolveCardId,
+  patchCardCover,
 } from './gallery.js';
 import { createLightbox } from './lightbox.js';
 
@@ -57,7 +58,13 @@ const state = {
   token: 0,
 };
 
-const lightbox = createLightbox(document.getElementById('lightbox'));
+const lightbox = createLightbox(document.getElementById('lightbox'), {
+  // 灯箱里第一次播放「没有封面的本地视频」时抓到的那一帧已经存进后端了，
+  // 顺手把网格上的占位块换成它，免得要刷新页面才看得到（见 cover.js）。
+  onCoverCaptured: (item, url) => {
+    patchCardCover(el.gallery, item, url);
+  },
+});
 
 /** 重置按钮的可用性直接取服务端回显的 active */
 function apiHasActive(active) {

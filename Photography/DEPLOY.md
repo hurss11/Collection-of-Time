@@ -626,6 +626,7 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 登录后马上掉线 | 会话密钥文件被删或权限不对；`ls -l admin.config.json` 应为 `600` |
 | 忘了密码 | `./run.sh reset-password`（会踢掉所有已登录设备） |
 | 上传图片没缩略图 | FFmpeg 未就绪，看 `./run.sh ffmpeg-status`；不影响上传本身 |
+| 本地视频没有封面（卡片是空块） | 典型原因就是没装 FFmpeg，后台抓不了帧。两条路：`./run.sh install-ffmpeg`，或者**用带管理员会话的浏览器在站点上点开播放一次** —— 播放到 1 秒左右会自动抓那一帧补成封面（前台 `assets/js/cover.js`，唯一一处前端写数据的路径；访客不触发）。也可以照旧手动传一张 |
 | FFmpeg 报架构不对 | 见上面第 7 节，重新装对应平台的构建 |
 | 数据文件损坏 | 从 `data/.backups/` 里挑一份恢复，或后台「备份」页回滚 |
 | **升级/还原后新功能没生效**，前端行为像旧版 | `assets/` 被整棵快照盖回去了（新后端 + 旧前端 JS）。`./run.sh doctor` 的「代码版本」会列出被改动的上游文件与还原命令：`git checkout -- <文件…>`；只有迁移包没有 `.git` 时，重新用新包覆盖一次 `assets/css/` 与 `assets/js/` |

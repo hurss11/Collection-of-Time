@@ -35,7 +35,7 @@ ffmpeg -i original.mov -c:v libx264 -crf 20 -preset slow \
 
 ## 封面
 
-封面统一由**后端**生成或接收上传（前端不做客户端抓帧）：
+封面由**后端**生成或接收上传，只有一处例外（第 6 条，缺 ffmpeg 时的兜底）：
 
 1. **上传时自动抓帧**：后台在上传本地视频时用 ffmpeg 抓取**第 0 秒（第一帧）**
    写入 `posters/`，并把 `poster` / `posterTime` 一起写进 `data/videos.json`。
@@ -51,7 +51,12 @@ ffmpeg -i original.mov -c:v libx264 -crf 20 -preset slow \
    `posters/up-<provider>-<id>.<ext>`。只访问白名单域名，整次抓取 12 秒硬上限；
    `--no-net-fetch` 可关闭。**抖音 / 小红书**与「其它外链」没有可用的抓取规则
    （前两站的页面是 JS 反爬壳或要登录），只能手动上传。
-6. **批量补封面**：`python tools/make_posters.py`。
+6. **第一次播放时自动补**：本地视频若还没有封面（典型原因就是这台机器没装 ffmpeg），
+   作者在站点上**点开播放**的那一下，浏览器把画面抓成 JPEG 交给后台存成 `posters/<id>.jpg`
+   （`assets/js/cover.js`）。只对**带管理员会话的浏览器**生效 —— 访客不写任何数据；
+   只在这条确实没有封面时才写（接口带 `onlyIfMissing=1`，不会盖掉你挑好的那张）；
+   失败静默，不影响播放。抓的是播放到 1 秒左右的那一帧，比第 0 秒更不容易是黑场。
+7. **批量补封面**：`python tools/make_posters.py`。
 
 `poster` 留空的本地视频在前台只显示占位块，并会在后台「数据完整性」里被列出来。
 （前台会退而求其次：播放器带 `#t=0.1` 直接显示开头一帧，所以即便没装 ffmpeg

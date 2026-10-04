@@ -116,6 +116,27 @@ export function resolveCardId(event) {
   return trigger ? trigger.dataset.open : null;
 }
 
+/**
+ * 补上封面后同步卡片：把占位块换成真图。
+ *
+ * 用在「本地视频第一次播放时抓的那一帧」（见 cover.js）：封面是灯箱里补的，
+ * 网格上的占位块得跟着换掉，否则要刷新页面才看得到。
+ * @returns {boolean} 是否真的换掉了
+ */
+export function patchCardCover(container, item, url) {
+  if (!container || !item || !url) return false;
+
+  const card = [...container.querySelectorAll('.card[data-id]')]
+    .find((node) => node.dataset.id === String(item.id));
+  const placeholder = card?.querySelector('.card__media .card__placeholder');
+  if (!placeholder) return false;
+
+  placeholder.insertAdjacentHTML('afterend', mediaMarkup({ imageUrl: url, title: item.title }));
+  placeholder.remove();
+  attachLazyFade(placeholder.parentElement || card);
+  return true;
+}
+
 /** 加载中的骨架屏 */
 export function renderSkeleton(container, count = 6) {
   const template = document.getElementById('skeleton-template');

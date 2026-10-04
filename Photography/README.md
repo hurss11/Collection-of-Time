@@ -323,7 +323,7 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | `POST /api/items/{集合}` | 新增 / 编辑；校验失败返回 400 + `fieldErrors[{field,message}]` |
 | `DELETE /api/items/{集合}/{id}[/file]` | 删除条目；加 `/file` 同时删除媒体文件 |
 | `POST /api/upload` | **批量**上传（字段 `files` 可重复；可另带 `posterFile` 作为本批视频的封面）；逐文件返回结果，失败不影响其它文件。**整批全失败时回 400**（body 里仍带 `results` 与 `summary`），部分成功回 200 + `summary.failed` |
-| `POST /api/videos/{id}/poster` | 为某个视频设置封面：上传图片（`file`）或抓帧（`time`，默认 0 = 第一帧） |
+| `POST /api/videos/{id}/poster` | 为某个视频设置封面：上传图片（`file`）或抓帧（`time`，默认 0 = 第一帧）。带 `onlyIfMissing=1` 时「已经有封面」就直接返回 `{skipped: true}`（站点页面自动补封面用，见 `cover.js`） |
 | `POST /api/assets/poster` | 上传一张封面素材（`file`，仅图片），返回 `{path, url}` —— 给「新增视频」用：条目还没有 id，先拿路径再回填表单 |
 | `POST /api/assets/thumb` | 按 `{provider, src}` 自动抓取外链视频封面（仅白名单域名、见「外链封面的自动获取」）；`--no-net-fetch` 时返回 400 |
 | `POST /api/assets/check-links` | 批量检查所有外链视频「还在不在」，返回 `counts` 与逐条 `results`，结果写进 `.run/link-status.json`（见「外链『还在不在』」）；`--no-net-fetch` 时返回 400 |
@@ -387,6 +387,11 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
   整批文件**全部**失败时接口回 400（body 里仍带逐条 `results`），不再把 `ok=false` 藏在 200 里；
 - **明文 HTTP 访问后台时会提醒**：登录页上方直接标出「明文 HTTP 连接」，登录后再补一条 toast ——
   后台只应通过 HTTPS 反代或 SSH 隧道访问（`Secure` Cookie 与登录口令都依赖这一点）；
+- **站点页面唯一一处写数据的路径是「补封面」**（`assets/js/cover.js` → `POST /api/videos/{id}/poster`）：
+  本地视频没封面时，第一次播放会抓一帧发上去。三个前提缺一不可 —— 浏览器必须**已有管理员
+  会话**（没有就静默不做，访客不写任何数据）、必须带**双提交 CSRF**（`cot_csrf` 可读 Cookie
+  对 `X-CSRF-Token`，与后台同一套）、服务端必须处于**该条目没有封面**的状态（`onlyIfMissing=1`，
+  已有封面原样返回）。所以它不比「后台换封面」多给任何人任何能力；
 - **出网只有一个口子**：外链封面自动抓取与外链状态检查（`adminlib/thumbs.py` 负责实际请求，
   `adminlib/linkcheck.py` 只借它地问官方接口）。两者都**不请求用户填的链接**，
   只访问白名单域名（服务商官方接口 + 缩略图 CDN）、只走 https、拒绝 IP 与 userinfo、
@@ -646,11 +651,18 @@ graph TD
   gallery --> data
   lightbox --> data
   lightbox --> exif[exif.js 原文件 EXIF]
+  lightbox --> cover[cover.js 没封面时抓一帧]
+  cover --> data
   exif --> data
 ```
 
-> 三个渲染模块都不含业务规则：过滤、排序、分页、统计、EXIF 文案与解析都在后端。
+> 渲染模块不含业务规则：过滤、排序、分页、统计、EXIF 文案与解析都在后端。
 > 浏览器只把 `/api/public/*` 返回的结构画出来。
+>
+> 唯一一处「前端动手写数据」的是 `cover.js`：本地视频没封面时，在第一次播放的那一刻
+> 抓一帧发给后台（`POST /api/videos/<id>/poster`）。**只有浏览器知道用户看到的是哪一帧**，
+> 而且服务端抓帧要 ffmpeg（缺 ffmpeg 的部署上封面此前只能人工传）；判定与落盘仍在后端 ——
+> 必须带管理员会话、必须 `onlyIfMissing=1`（已有封面就原样返回），失败静默。
 
 ---
 
@@ -879,7 +891,16 @@ YouTube，这比代码问题常见得多。一条命令看清：
     前者选本地图片回填路径，后者按 provider + 链接去服务商取缩略图（外链站内不播放，
     封面就是卡片上那张图，必填）；**外链留空直接保存也会自动抓**；认出是抖音 / 小红书时
     抓取按钮置灰并提示原因（这两站服务端抓不到），手动上传即可；
-  - 批量补封面用 `python tools/make_posters.py`。前端不做客户端抓帧。
+  - **没封面时，第一次播放就补一张**：本地视频若还没有封面（典型原因就是这台机器没装
+    ffmpeg），作者在站点上点开播放的那一下，浏览器把画面抓成 JPEG 交给后台存成
+    `posters/<id>.jpg`（`assets/js/cover.js`），网格上的占位块当场换成这张图。
+    只对**带管理员会话的浏览器**生效（访客不写任何数据），只在确实没有封面时才写
+    （`onlyIfMissing=1`，不会盖掉你挑好的那张），失败静默、不影响播放。
+    前后端分域部署（`--allow-origin` + `<meta name="api-base">`）时，跨站请求带不上
+    `SameSite=Strict` 的会话 Cookie，这一条会自动不生效 —— 不报错，只是补不了封面。
+    这是「逻辑在后端」的一处例外：存图、写条目、回收旧封面仍然全在后端，
+    前端只负责取像素 —— 因为**只有浏览器知道用户看到的是哪一帧**，而服务端抓帧还要 ffmpeg；
+  - 批量补封面用 `python tools/make_posters.py`。前端不做其它客户端抓帧。
 - **视频参数面板**：灯箱中展示来源、时长、分辨率、帧率、编码、设备与地点。
 - **放大查看**：照片与本地视频都能缩放 —— 缩放控件（− / 百分比 / ＋）、滚轮、双击画面、
   拖拽平移、手机双指捏合与张开；`适应` 按钮在「适应窗口」与「原始像素 1:1」之间切换，

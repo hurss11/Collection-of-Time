@@ -1785,6 +1785,11 @@ class Handler(SimpleHTTPRequestHandler):
         return value if value >= 0 else default
 
     @staticmethod
+    def only_if_missing(fields: dict[str, str]) -> bool:
+        """`onlyIfMissing=1`：只在条目还没有封面时才写入（站点页面自动补封面用）。"""
+        return query.text(fields.get("onlyIfMissing")).lower() not in ("", "0", "false", "no")
+
+    @staticmethod
     def _cover_suffix(filename: str) -> str:
         """封面文件名的后缀；不是图片、或名字里有危险扩展名时返回空串。"""
         cleaned = store.safe_filename(filename, fallback="cover")
@@ -1862,7 +1867,12 @@ class Handler(SimpleHTTPRequestHandler):
         return True, "", store.ensure_relative(ROOT, target)
 
     def api_video_poster(self, rest: list[str]) -> None:
-        """为某个视频设置封面：上传一张图片，或从视频里抓一帧（默认第一帧）。"""
+        """为某个视频设置封面：上传一张图片，或从视频里抓一帧（默认第一帧）。
+
+        表单之外还有一处调用：站点页面在**第一次播放没有封面的本地视频**时，把当前帧
+        画成 JPEG 发过来（`assets/js/cover.js`，只在浏览器带管理员会话时才会发生）。
+        那种调用会带 `onlyIfMissing=1` —— 已经有封面就原样返回，免得把作者挑的那张盖掉。
+        """
         if len(rest) < 3:
             raise ApiError("用法：POST /api/videos/{id}/poster")
 
@@ -1876,6 +1886,18 @@ class Handler(SimpleHTTPRequestHandler):
         fields, files = self.read_multipart()
         cover = next((part for part in (files.get("file") or []) if part.get("size")), None)
         warnings: list[str] = []
+
+        if cover and self.only_if_missing(fields) and query.text(item.get("poster")):
+            self.send_json({
+                "ok": True,
+                "skipped": True,
+                "reason": "这条视频已经有封面了",
+                "item": item,
+                "posterUrl": query.text(item.get("poster")),
+                "posterTime": item.get("posterTime", 0),
+                "warnings": [],
+            })
+            return
 
         if cover:
             poster, problems = self._store_cover(item_id, cover)

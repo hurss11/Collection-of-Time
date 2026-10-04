@@ -9,12 +9,20 @@
  * 播放交给原站（卡片本身就是指向原站观看页的链接，见 gallery.js）。
  *
  * 只做「打开 / 关闭 / 上下张 / 键盘 / 焦点 / 缩放平移 / 参数渲染」，不做任何解析与格式化。
+ * 唯一一处副作用：没有封面的本地视频在第一次播放时，会抓一帧交给后端补封面
+ * （`captureCoverAt` → `cover.js`；是否真的写入由那里判断，失败静默）。
  */
 
 import { escapeHtml } from './data.js';
 import { readExifRows } from './exif.js';
+import { captureCoverFrame } from './cover.js';
 
 const VIDEO = 'video';
+
+/** 播放到这个秒数再抓封面：第 0 秒常常是淡入 / 全黑，抓下来等于没有 */
+const COVER_AT_SECONDS = 1;
+/** 短片兜底：暂停或播完时只要画面动过，就用当时那一帧 */
+const COVER_MIN_SECONDS = 0.15;
 
 function exifRowsHtml(rows) {
   if (!rows || !rows.length) {
@@ -34,9 +42,15 @@ function exifRowsHtml(rows) {
 /**
  * 创建灯箱实例。
  * @param {HTMLElement} root 灯箱根节点（含 [data-lb-*] 控件）
+ * @param {{onCoverCaptured?: (item: object, url: string) => void}} [options]
+ *        onCoverCaptured：本地视频第一次播放时抓到封面并已存进后端，回调里可以把网格上的
+ *        占位块换成这张图（见 app.js → gallery.js 的 patchCardCover）。
  * @returns {{ open: (items: object[], index: number) => void, close: () => void }}
  */
-export function createLightbox(root) {
+export function createLightbox(root, options = {}) {
+  const onCoverCaptured = typeof options.onCoverCaptured === 'function'
+    ? options.onCoverCaptured
+    : null;
   const imageEl = root.querySelector('#lb-image');
   const videoEl = root.querySelector('#lb-video');
   const titleEl = root.querySelector('#lb-title');
@@ -63,6 +77,11 @@ export function createLightbox(root) {
   let index = 0;
   let lastFocused = null;
 
+  /** 「没封面 + 本地视频」的条目 id：播放到一定进度就抓一帧补封面（见 cover.js） */
+  let coverCaptureId = null;
+  /** 本页已经试过的条目：同一条只试一次，反复打开不重复上传 */
+  const coverAttempted = new Set();
+
   /* ---------- 缩放状态（scale = 1 表示「适应窗口」） ---------- */
   const MIN_SCALE = 0.25;
   const MAX_SCALE = 8;
@@ -86,6 +105,7 @@ export function createLightbox(root) {
 
   /** 停止并卸载播放器，避免关闭后仍在后台播放 */
   function resetMedia() {
+    coverCaptureId = null;
     videoEl.pause();
     videoEl.removeAttribute('src');
     videoEl.load();
@@ -98,6 +118,12 @@ export function createLightbox(root) {
     imageEl.hidden = isVideo;
     videoEl.hidden = !isVideo;
     stageEl.classList.toggle('is-video', isVideo);
+
+    // 站内能播、又还没有封面的本地视频：播放一会儿就顺手抓一帧当封面
+    coverCaptureId = isVideo && !item.isEmbed && !item.imageUrl && item.srcUrl
+      && !coverAttempted.has(item.id)
+      ? item.id
+      : null;
 
     if (!isVideo) {
       imageEl.src = item.srcUrl || item.imageUrl;
@@ -117,6 +143,33 @@ export function createLightbox(root) {
     setStatus(
       `未找到视频文件：<code>${escapeHtml(item.srcMissing ? '（文件缺失）' : '（未配置 src）')}</code>`,
     );
+  }
+
+  /**
+   * 没封面的本地视频：播放到一定进度就抓当前帧，交给后端存成封面。
+   *
+   * 服务端抓帧要 ffmpeg（缺 ffmpeg 的部署上，封面此前只能靠人工上传），而浏览器
+   * 既然能播就一定能解码 —— 抓到的还是用户真正看到的那一帧。是否真的写入由
+   * cover.js 决定（只在浏览器带管理员会话时才做），这里只挑时机：
+   * 「进度」用第 1 秒（避开淡入 / 黑场），「短片」用暂停或播完时的那一帧兜底。
+   */
+  async function captureCoverAt(reason) {
+    const item = current();
+    if (!coverCaptureId || !item || item.id !== coverCaptureId) return;
+
+    const at = videoEl.currentTime;
+    const threshold = reason === 'progress' ? COVER_AT_SECONDS : COVER_MIN_SECONDS;
+    if (!(at >= threshold)) return;
+
+    coverCaptureId = null; // 一次机会，成败都不再重复
+    coverAttempted.add(item.id);
+
+    const url = await captureCoverFrame(videoEl, item);
+    if (!url) return;
+
+    item.imageUrl = url; // 同页再打开这条时不用再靠 `#t=0.1` 顶替封面
+    if (isOpen() && current() === item) videoEl.setAttribute('poster', url);
+    if (onCoverCaptured) onCoverCaptured(item, url);
   }
 
   /* ---------- 缩放 / 平移 ---------- */
@@ -472,6 +525,11 @@ export function createLightbox(root) {
   videoEl.addEventListener('durationchange', syncVBar);
   videoEl.addEventListener('play', syncPlayButton);
   videoEl.addEventListener('pause', syncPlayButton);
+
+  // 顺手补封面（只在「没封面的本地视频 + 带管理员会话的浏览器」时才会真发请求）
+  videoEl.addEventListener('timeupdate', () => captureCoverAt('progress'));
+  videoEl.addEventListener('pause', () => captureCoverAt('settle'));
+  videoEl.addEventListener('ended', () => captureCoverAt('settle'));
 
   viewportEl?.addEventListener('dblclick', (event) => {
     if (!activeMedia()) return;
