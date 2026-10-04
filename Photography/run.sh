@@ -673,6 +673,13 @@ AUTOUPDATE_LOCK="$RUN_DIR/autoupdate.lock"
 
 au() { py -m adminlib.autoupdate "$@"; }
 
+# git 仓库根。**应用目录不一定是仓库根**：`<仓库根>/Photography` 这种布局里 git 根在
+# 上一层（git 自己会向上找到），所以判定「是不是 git 检出」要问 git，不要只看
+# "$APP_DIR/.git" —— 那只在「部署目录即仓库根」时成立，写成那样会让这种布局
+# 既更新不了、也接管不了。
+git_repo_root() { git -C "$APP_DIR" rev-parse --show-toplevel 2>/dev/null; }
+in_git_repo() { [ -n "$(git_repo_root)" ]; }
+
 # 把 JSON 里的字符串数组逐行打印，并剥掉 git status 的状态列（` M path` → `path`）
 json_paths() {
   py -c '
@@ -956,7 +963,7 @@ update() {
   [ "$quiet" -eq 1 ] || banner
   require_python
 
-  if [ ! -d "$APP_DIR/.git" ]; then
+  if ! in_git_repo; then
     if [ "$check_only" -eq 1 ]; then
       [ "$quiet" -eq 0 ] && warn "不是 git 检出，没有可检查的更新"
       return 0
@@ -1055,7 +1062,7 @@ update_check_on() {
     info "  (crontab -l 2>/dev/null; echo \"*/5 * * * * cd $APP_DIR && ./run.sh update --check --quiet >> .run/update-check.log 2>&1\") | crontab -"
     return 1
   fi
-  if [ ! -d "$APP_DIR/.git" ]; then
+  if ! in_git_repo; then
     warn "这里不是 git 检出：定时检查会因为 ConditionPathIsDirectory 直接跳过"
     info "  先接管： ./run.sh adopt --repo <仓库地址>"
   fi

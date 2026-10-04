@@ -495,6 +495,9 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 > `data/`、`assets/` 里的上传内容与 `admin.config.json` 一概不动，重启后健康检查失败会
 > 自动回滚。还能选装一个「定时检查有新代码」的提醒（`sudo ./run.sh update-check on`，
 > 只提醒不执行）。细节见 [DEPLOY.md「在服务器上更新代码」](./DEPLOY.md)。
+>
+> 部署目录是仓库的**子目录**时（`<仓库根>/Photography`）也算 git 检出，不用 `adopt`：
+> 更新按 git 报出来的仓库根判定，直接 `./run.sh update`。
 
 **方式一：SSH 端口转发（推荐，最省事也最安全）**
 

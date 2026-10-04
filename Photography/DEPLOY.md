@@ -533,6 +533,13 @@ git status --short     # 有 .git 的话：只应剩下 data/ 与上传内容
 ./run.sh adopt --repo https://github.com/hurss11/Collection-of-Time.git
 ```
 
+> **仓库根不一定就是部署目录。** 如果服务器上是 `<仓库根>/Photography` 这种布局
+> （`git clone` 到 `/root/Collection-of-Time`，应用在它的 `Photography/` 子目录），
+> git 根在上一层：`update`、`update --check`、`update-check` 都按 git 实际报出来的
+> 仓库根判定，不需要额外操作。顺带说明 `adopt` 什么时候才需要 —— 只有**完全没有 git**
+> 的目录才要它：已经在某个检出里时它会拒绝（避免在仓库里再套一层仓库），
+> 这种布局直接 `./run.sh update` 即可。
+
 **为什么不做成「推完自动上线」**：单人小站上，自动化的收益只是省下一次登录，
 代价是把 `git push` 从「记录代码」变成「在服务器上执行代码」——手机上用 GitHub
 改一行 `adminlib/*.py`、误推一次、合错分支，站点都会在几分钟内无声地变掉。

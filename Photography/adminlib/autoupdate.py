@@ -8,6 +8,10 @@
   **上传的内容**（`assets/img/photos/**`、`assets/video/posters/**`、上传的视频文件）
   —— 这是站点的真实内容，任何更新都不允许覆盖它。
 
+本目录**不一定就是仓库根**：`<仓库根>/Photography` 这种布局（本仓库自己的布局）里 git 根在
+上一层。所以「是不是 git 检出」与「哪些文件算代码」都得按 git 报出来的仓库根对齐
+（`work_tree_root()` / `app_prefix()`），不要写死 `ROOT/.git`。
+
 所以更新不是 `git pull`，而是「**按路径**把代码换过去」：
 
     git checkout <新版本> -- <CODE_PATHS>
@@ -117,13 +121,40 @@ def _git_lines(*args: str, **kwargs) -> list[str]:
     return [line for line in _git(*args, **kwargs).splitlines() if line.strip()]
 
 
-def is_repo() -> bool:
+def work_tree_root() -> Path | None:
+    """git 工作树根；ROOT 不在任何仓库里时返回 None。
+
+    仓库根可能在本目录的**上一层**（`<仓库根>/Photography`，本仓库自己的布局），
+    git 会自己向上找到它 —— 判定「是不是 git 检出」只问 git，别看 `ROOT/.git`
+    （那个目录只在这种布局下存在）。
+    """
     if not git_available():
-        return False
+        return None
     try:
-        return bool(_git("rev-parse", "--git-dir").strip())
+        top = _git("rev-parse", "--show-toplevel").strip()
     except (GitError, OSError):
-        return False
+        return None
+    root = Path(top) if top else None
+    return root if root and root.is_dir() else None
+
+
+def app_prefix() -> str:
+    """ROOT 相对工作树根的路径前缀（`""` 表示 ROOT 就是仓库根，例如 `"Photography"`）。
+
+    有些 git 命令给的是**相对仓库根**的路径（`diff --name-status`、`status --porcelain`），
+    而这里一律按「相对 ROOT」理解：不削掉这层前缀，代码文件会被当成内容 ——
+    更新看着成功，其实一个文件都没换。
+    """
+    if not git_available():
+        return ""
+    try:
+        return _git("rev-parse", "--show-prefix").strip().strip("/")
+    except (GitError, OSError):
+        return ""
+
+
+def is_repo() -> bool:
+    return work_tree_root() is not None
 
 
 def remote_url() -> str:
@@ -290,12 +321,28 @@ def _in_code(path: str) -> bool:
     return any(path == entry or path.startswith(entry + "/") for entry in CODE_PATHS)
 
 
+def _code_status_lines(*extra: str) -> list[str]:
+    """`git status --porcelain` 里与代码路径有关的行，路径统一削成「相对 ROOT」。
+
+    porcelain 给的是相对仓库根的路径，而调用方（包括打印给用户照抄的
+    `git checkout -- <路径>`）都按相对 ROOT 来理解，所以在这里削掉前缀。
+    """
+    lines = _git_lines("status", "--porcelain", *extra, "--", *CODE_PATHS)
+    prefix = app_prefix()
+    if not prefix:
+        return lines
+    return [line[:3] + line[3:][len(prefix) + 1:]
+            for line in lines if line[3:].startswith(prefix + "/")]
+
+
 def _split_changes(base: str, target: str) -> dict:
-    """base → target 的改动，按代码 / 内容分开。"""
+    """base → target 的改动，按代码 / 内容分开（路径相对 ROOT）。"""
     code: list[dict] = []
     content: list[dict] = []
     deleted: list[str] = []
-    for line in _git_lines("diff", "--name-status", base, target):
+    # --relative：路径按当前目录（ROOT）给，顺带排除 ROOT 之外的改动 ——
+    # 「ROOT 就是仓库根」与「仓库根在上一层」两种情况因此得到同一套路径
+    for line in _git_lines("diff", "--name-status", "--relative", base, target):
         parts = line.split("\t")
         if len(parts) < 2:
             continue
@@ -403,9 +450,9 @@ def inspect(*, fetch: bool = True, branch: str = BRANCH) -> dict:
 
     # 只看**已跟踪**文件的改动：未跟踪的多半是运行时产物（`__pycache__` 之类），
     # 更新根本不会碰它们；把它们也算成「本地改过」会让更新永远被自己拦下。
-    info["dirty_code"] = _git_lines("status", "--porcelain", "--untracked-files=no", "--", *CODE_PATHS)
+    info["dirty_code"] = _code_status_lines("--untracked-files=no")
     info["untracked_code"] = [
-        line[3:] for line in _git_lines("status", "--porcelain", "--", *CODE_PATHS)
+        line[3:] for line in _code_status_lines()
         if line.startswith("??") and "__pycache__" not in line and not line.endswith(".pyc")
     ]
 
@@ -524,8 +571,11 @@ def adopt(url: str, *, branch: str = BRANCH) -> dict:
     """把「解压迁移包」的部署目录就地变成 git 检出（不覆盖任何本地文件）。"""
     if not git_available():
         return {"ok": False, "reason": "系统里没有 git"}
-    if is_repo():
-        return {"ok": False, "reason": f"{ROOT} 已经是 git 检出了，不用再来一次"}
+    root = work_tree_root()
+    if root is not None:
+        where = "" if root == ROOT else f"（仓库根在上层：{root}）"
+        return {"ok": False,
+                "reason": f"{ROOT} 已经在 git 检出内{where}，不用再来一次；直接 ./run.sh update"}
     if not (ROOT / "admin.py").is_file() or not (ROOT / "run.sh").is_file():
         return {"ok": False, "reason": f"{ROOT} 看起来不是 Photography 项目目录（缺 admin.py / run.sh）"}
 
@@ -570,13 +620,22 @@ def normalize_interval(text: str) -> str:
     return f"{amount}{unit}"
 
 
+def update_condition_dir() -> Path:
+    """定时检查单元的 ConditionPathIsDirectory：不在 git 检出里就跳过。
+
+    条件是**仓库根**而不是 `ROOT/.git` —— 部署目录是仓库子目录时后者不存在，
+    定时器会被 systemd 静默跳过（看着装了、其实永远不检查）。
+    """
+    return work_tree_root() or (ROOT / ".git")
+
+
 def update_service_unit() -> str:
     return f"""[Unit]
 Description=Collection of Time - 检查是否有新代码（只提醒，不执行更新）
 After=network-online.target
 Wants=network-online.target
-# 没有 .git（用迁移包解压的部署）就不必反复失败，直接跳过
-ConditionPathIsDirectory={ROOT}/.git
+# 不在 git 检出里（用迁移包解压的部署）就不必反复失败，直接跳过
+ConditionPathIsDirectory={update_condition_dir()}
 
 [Service]
 Type=oneshot
