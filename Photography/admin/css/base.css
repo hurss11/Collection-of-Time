@@ -181,8 +181,11 @@ a { color: var(--accent); }
 textarea.input { resize: vertical; font-family: inherit; }
 select.input { cursor: pointer; }
 
-/* 服务端下发的字段级错误（fieldErrors） */
+/* 服务端下发的字段级错误（fieldErrors）。
+   第二行是为了压过 `.field > span`（它把所有直接子 span 染成灰色，
+   而那个选择器的特异性比单独一个类名高，不写这一条错误提示会是灰的）。 */
 .field__error { font-size: 11.5px; color: var(--danger); }
+.field > .field__error { font-size: 11.5px; color: var(--danger); }
 
 /* ============================================================
    表单
@@ -193,6 +196,10 @@ select.input { cursor: pointer; }
 .field > span { font-size: 12px; color: var(--text-mute); }
 .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .field--wide { grid-column: 1 / -1; }
+/* 「文本框 + 上传按钮」同行；窄屏时按钮换到第二行，保持可点区域 */
+.field__pair { flex-wrap: wrap; }
+.field__pair .input { flex: 1 1 12ch; min-width: 0; }
+.field__pair .btn { flex: 0 0 auto; white-space: nowrap; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-soft); }
 .check input { accent-color: var(--accent); }
 

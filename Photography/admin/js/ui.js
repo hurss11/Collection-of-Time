@@ -131,7 +131,7 @@ function fieldMarkup(field, value, albums) {
     if (value && !list.some((a) => a.value === value)) {
       options.push(`<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}（相册不存在）</option>`);
     }
-    return `<label class="field">${label}<select ${common}>${options.join('')}</select>${hint}</label>`;
+    return `<label class="field">${label}<select ${common}>${options}</select>${hint}</label>`;
   }
 
   if (field.type === 'textarea') {
@@ -141,8 +141,22 @@ function fieldMarkup(field, value, albums) {
   const type = field.type === 'number' ? 'number' : field.type === 'password' ? 'password' : 'text';
   const step = field.type === 'number' ? ' step="any"' : '';
   const autocomplete = field.type === 'password' ? ' autocomplete="new-password"' : '';
-  return `<label class="field">${label}<input ${common} type="${type}"${step}${autocomplete}
-    value="${escapeHtml(value ?? '')}" placeholder="${escapeHtml(field.placeholder || '')}" />${hint}</label>`;
+  const input = `<input ${common} type="${type}"${step}${autocomplete}
+    value="${escapeHtml(value ?? '')}" placeholder="${escapeHtml(field.placeholder || '')}" />`;
+
+  // 服务端用 field.upload 声明「这个文本字段还能靠上传填充」（如视频封面图）。
+  // 用 div 而不是 label 包起来：里面是按钮 + 隐藏的 file 控件，
+  // 塞进 label 里点按钮会连带激活 label 指向的输入框。
+  if (field.upload) {
+    return `<div class="field" data-upload-field="${escapeHtml(field.key)}">${label}
+      <div class="row field__pair">${input}
+        <button class="btn btn--sm" type="button" data-upload="${escapeHtml(field.upload)}">上传图片…</button>
+      </div>
+      <input type="file" accept="image/*" data-upload-input="${escapeHtml(field.upload)}" hidden />
+      ${hint}</div>`;
+  }
+
+  return `<label class="field">${label}${input}${hint}</label>`;
 }
 
 /**
@@ -182,11 +196,16 @@ export function readForm(scope) {
   return values;
 }
 
+/** 字段容器（`.field`）；错误提示统一放在它里面，位置与控件结构无关 */
+function fieldContainer(node) {
+  return node.closest('.field') || node.parentElement || node;
+}
+
 /** 清掉上一次的字段级错误标记 */
 export function clearFieldErrors(scope) {
   for (const node of $$('[data-key]', scope)) {
     node.classList.remove('is-invalid');
-    node.parentElement?.querySelectorAll('.field__error').forEach((el) => el.remove());
+    fieldContainer(node).querySelectorAll('.field__error').forEach((el) => el.remove());
   }
 }
 
@@ -208,7 +227,7 @@ export function showFieldErrors(scope, errors) {
     const note = document.createElement('span');
     note.className = 'field__error';
     note.textContent = item.message || '该项有误';
-    node.after(note);
+    fieldContainer(node).append(note);
     first = first || node;
   }
 

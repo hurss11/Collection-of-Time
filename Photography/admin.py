@@ -851,6 +851,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.api_video_poster(segments)
             return
 
+        if head == "assets" and method == "POST" and len(segments) >= 2 and segments[1] == "poster":
+            self.api_asset_poster()
+            return
+
         if head == "item" and method == "GET":
             self.api_item(segments[1:])
             return
@@ -1323,6 +1327,12 @@ class Handler(SimpleHTTPRequestHandler):
         except store.StoreError as exc:
             raise ApiError(str(exc)) from exc
 
+        # 换过封面就清掉被替换的那张，免得 assets/video/posters/ 越积越多
+        if collection == "videos" and item_id:
+            old_poster = query.text((existing or {}).get("poster"))
+            if old_poster and old_poster != query.text(saved.get("poster")):
+                self._drop_replaced_cover(item_id, old_poster)
+
         remember("保存条目", f"{collection} / {saved.get('id')}")
         return saved, warnings
 
@@ -1648,6 +1658,25 @@ class Handler(SimpleHTTPRequestHandler):
                 except OSError:
                     pass
 
+    def _drop_replaced_cover(self, item_id: str, old_poster: str) -> None:
+        """条目保存后，删掉被替换掉的那张「一个视频一张」的封面（`posters/<id>.<ext>`）。
+
+        手动上传的封面素材叫 `up-*`，可能被多个条目引用（也可以反过来当普通图片用），
+        所以只删按条目 id 命名的那种。
+        """
+        path = ROOT / old_poster
+        try:
+            if path.parent.resolve() != POSTER_DIR.resolve():
+                return
+        except OSError:
+            return
+        if path.stem != store.safe_filename(item_id, fallback="video"):
+            return
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
     def _store_cover(self, item_id: str, cover: dict) -> tuple[str, list[str]]:
         """把上传的封面图片落盘，返回相对路径与提示。"""
         suffix = self._cover_suffix(cover.get("filename") or "")
@@ -1720,6 +1749,31 @@ class Handler(SimpleHTTPRequestHandler):
             "posterTime": saved.get("posterTime", 0),
             "warnings": warnings,
         })
+
+    def api_asset_poster(self) -> None:
+        """上传一张图片作为封面素材，返回它的路径（`POST /api/assets/poster`）。
+
+        给「新增视频」表单用：新条目在保存前还没有 id，没法走
+        `POST /api/videos/{id}/poster`，所以先上传拿到路径、再由前端回填「封面图」字段。
+        文件名统一带 `up-` 前缀，避免和「一个视频一张封面」的 `posters/<id>.<ext>`
+        撞名而被换封面时的清理逻辑删掉。
+        """
+        fields, files = self.read_multipart()
+        cover = next((part for part in (files.get("file") or []) if part.get("size")), None)
+        if cover is None:
+            raise ApiError("没有收到图片（字段名应为 file）")
+
+        suffix = self._cover_suffix(cover.get("filename") or "")
+        if not suffix:
+            raise ApiError("封面必须是图片（jpg / png / webp / avif / tiff）")
+
+        stem = Path(store.safe_filename(cover.get("filename") or "", fallback="cover")).stem
+        target = store.unique_path(POSTER_DIR, f"up-{store.safe_filename(stem, fallback='cover')}{suffix}")
+        self.adopt_temp(Path(cover["path"]), target)
+
+        relative = store.ensure_relative(ROOT, target)
+        remember("上传封面素材", relative)
+        self.send_json({"ok": True, "path": relative, "url": f"/{relative}", "bytes": target.stat().st_size})
 
     # ---------- 备份 ----------
 
@@ -1846,6 +1900,61 @@ def sweep_upload_temps() -> int:
         if not path.is_file():
             continue
         try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+COVER_SWEEP_AGE = 24 * 3600        # 上传的封面素材最多留一天，给「表单还开着」留足时间
+
+
+def sweep_unused_covers(now: float | None = None) -> int:
+    """清掉没人引用的封面素材（`assets/video/posters/up-*`）。
+
+    新增 / 编辑视频时点「上传图片」，文件会先落盘才能拿到路径（见 api_asset_poster）。
+    如果那个弹窗最后没保存，文件就成了孤儿。这里保守地回收：
+
+    - 只碰 `up-` 前缀 —— 那是本程序自己起的名字，`posters/<id>.<ext>` 之类一律不动；
+    - 三份数据里**任何字符串**提到它就不删（缩进比对全部字段，不猜哪个字段会引用）；
+    - 只删超过一天没动过的，避免正在填的表单被清掉。
+
+    返回清理的文件数。
+    """
+    if not POSTER_DIR.is_dir():
+        return 0
+
+    referenced: set[str] = set()
+    for collection in store.COLLECTIONS:
+        try:
+            rows = STORE.load(collection)
+        except (store.StoreError, OSError):
+            continue
+
+        def walk(node) -> None:
+            if isinstance(node, dict):
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+            elif isinstance(node, str) and node:
+                referenced.add(node.strip().lstrip("/"))
+
+        walk(rows)
+
+    deadline = (now if now is not None else time.time()) - COVER_SWEEP_AGE
+    removed = 0
+    for path in POSTER_DIR.glob("up-*"):
+        if not path.is_file():
+            continue
+        relative = f"assets/video/posters/{path.name}"
+        if relative in referenced:
+            continue
+        try:
+            if path.stat().st_mtime > deadline:
+                continue
             path.unlink()
             removed += 1
         except OSError:
@@ -2291,6 +2400,10 @@ def main() -> int:
     cleaned = sweep_upload_temps()
     if cleaned:
         print(f"  临时文件 : 清理了 {cleaned} 个上次未完成的上传残留（{UPLOAD_TMP_DIR}）")
+
+    orphan_covers = sweep_unused_covers()
+    if orphan_covers:
+        print(f"  封面清理 : 回收了 {orphan_covers} 个没人引用的封面素材（表单没保存就关掉留下的）")
 
     try:
         httpd = Server((args.host, args.port), Handler)

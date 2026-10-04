@@ -223,7 +223,45 @@ async function openEditor(collection, id, isNew) {
     title: `${isNew ? '新增' : '编辑'}${noun}${isNew ? '' : ` · ${id}`}`,
     hint: isNew ? '保存后由服务端分配 id 并写入数据文件' : '保存会立即写回数据文件',
     bodyHtml: renderForm(fields, values, albums),
+    onMount: (root) => wireCoverUpload(root),
     onSave: saveEditor,
+  });
+}
+
+/**
+ * 给带 `field.upload` 声明的字段接上「上传图片…」按钮（目前是视频的封面图）。
+ *
+ * 新增视频时条目还没有 id，走不了 `POST /api/videos/{id}/poster`，
+ * 所以先上传拿到路径（`POST /api/assets/poster`）、回填文本框，再随表单一起保存。
+ */
+function wireCoverUpload(root) {
+  const button = $('[data-upload="poster"]', root);
+  const picker = $('[data-upload-input="poster"]', root);
+  const field = $('[data-key="poster"]', root);
+  if (!button || !picker || !field) return;
+
+  button.addEventListener('click', () => picker.click());
+  picker.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = '上传中…';
+    try {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const payload = await api.uploadCover(form);
+      field.value = payload.path || '';
+      field.classList.remove('is-invalid');
+      toast(`封面已上传，保存后生效：${payload.path}`, 'ok', 5000);
+    } catch (error) {
+      toast(error.message, 'err', 6000);
+    } finally {
+      button.disabled = false;
+      button.textContent = label;
+    }
   });
 }
 
