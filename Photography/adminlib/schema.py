@@ -23,6 +23,8 @@ PROVIDERS = [
     {"value": "bilibili", "label": "哔哩哔哩"},
     {"value": "youtube", "label": "YouTube"},
     {"value": "vimeo", "label": "Vimeo"},
+    {"value": "douyin", "label": "抖音"},
+    {"value": "xiaohongshu", "label": "小红书"},
     {"value": "embed", "label": "其它外链"},
 ]
 
@@ -61,11 +63,11 @@ FIELDS: dict[str, list[dict]] = {
         {"key": "title", "label": "标题", "type": "text", "required": True},
         {"key": "album", "label": "相册", "type": "album"},
         {"key": "provider", "label": "来源", "type": "detected", "from": "src",
-         "hint": "按上面的链接自动识别（本地文件 / 哔哩哔哩 / YouTube / Vimeo / 其它外链），不用手选"},
+         "hint": "按上面的链接自动识别（本地文件 / 哔哩哔哩 / YouTube / Vimeo / 抖音 / 小红书 / 其它外链），不用手选"},
         {"key": "src", "label": "文件路径 / 视频链接 / BV 号", "type": "text", "mono": True,
          "placeholder": "assets/video/xxx.mp4 或 BV1xxxxxxxxx 或 https://…"},
         {"key": "poster", "label": "封面图", "type": "text", "mono": True, "upload": "poster",
-         "hint": "外链视频必填：卡片上显示的就是这张图（留空会尝试自动获取）。也可以点旁边的按钮上传一张"},
+         "hint": "外链视频必填：卡片上显示的就是这张图（留空会尝试自动获取；抖音 / 小红书 抓不到，需自己传）"},
         {"key": "posterTime", "label": "抓帧时间（秒）", "type": "number"},
         {"key": "duration", "label": "时长（秒）", "type": "number"},
         {"key": "resolution", "label": "分辨率", "type": "text", "placeholder": "3840 × 2160"},

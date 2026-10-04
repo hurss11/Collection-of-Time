@@ -1945,6 +1945,8 @@ class Handler(SimpleHTTPRequestHandler):
         info = query.describe_source(src)
         info["fetchable"] = bool(NET_FETCH and info["provider"] in thumbs.FETCHABLE_PROVIDERS)
         info["netFetch"] = NET_FETCH
+        if not NET_FETCH:
+            info["fetchNote"] = "服务端已关闭出网抓取（--no-net-fetch），请手动上传封面"
         self.send_json({"ok": True, **info})
 
     def api_asset_thumb(self) -> None:
@@ -1961,11 +1963,9 @@ class Handler(SimpleHTTPRequestHandler):
             raise ApiError("服务端已关闭出网抓取（启动参数 --no-net-fetch），请手动上传封面")
         payload = self.read_json()
         src = query.text(payload.get("src"))
-        # 表单不再手选来源，所以以「按链接识别」为准 —— 但只在识别成**已知服务商**时才覆盖
-        # 显式传来的 provider（免得填错来源时点了没反应）；识别成其它外链或本地文件时，
-        # 仍然按调用方给的 provider 走，这样错误提示才是它真正想做的事。
-        detected = query.detect_provider(src)
-        provider = detected if detected in thumbs.FETCHABLE_PROVIDERS else query.text(payload.get("provider"))
+        # 表单不再手选来源，所以以「按链接识别」为准：识别出来就用它（填错的 provider
+        # 不会让按钮点了没反应），只有认不出链接时（空、怪协议）才用调用方给的 provider。
+        provider = query.detect_provider(src) or query.text(payload.get("provider"))
 
         try:
             cover = thumbs.fetch_cover(provider, src)

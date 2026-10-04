@@ -280,11 +280,9 @@ function wireSourceDetect(root) {
     }
     if (fetchButton) {
       fetchButton.disabled = !payload.fetchable;
-      if (!payload.fetchable) {
-        fetchButton.title = payload.provider === 'file'
-          ? '本地视频不需要抓封面'
-          : '这个来源抓不到封面，请手动上传一张';
-      }
+      // 每次都由服务端那句说明覆盖：能抓时为空串（清掉上一次留下的提示），
+      // 抓不到时说明为什么（抖音 / 小红书 需要登录或 JS、其它外链没有统一规则…）。
+      fetchButton.title = payload.fetchNote || '';
     }
   };
 

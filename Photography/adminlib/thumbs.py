@@ -20,6 +20,10 @@
 链接识别是纯计算（`plan()`，不联网），抓取只按 `plan()` 给出的固定地址进行：
 YouTube 用固定的 `i.ytimg.com/vi/<id>/…`；B 站与 Vimeo 先问官方接口拿缩略图地址，
 再把那个地址按图片白名单校验一遍。用户填的链接**本身不会被请求**。
+
+**抖音与小红书不做抓取**（见 `MANUAL_COVER_PROVIDERS`）：它们的页面需要登录态或 JS 才能读到
+内容（分享链接里的小红书 `xsec_token` 就是为此），服务端不去绕过 —— 这两个域名
+连白名单都没进。封面请自己传一张，点卡片跳原站的逻辑照常工作。
 """
 from __future__ import annotations
 
@@ -47,6 +51,9 @@ MAX_HOPS = 3
 META_HOSTS = ("api.bilibili.com", "vimeo.com", "www.youtube.com")
 # 能抓到封面的来源（「其它外链」各站规则不统一，本地文件不需要）
 FETCHABLE_PROVIDERS = ("youtube", "bilibili", "vimeo")
+# 页面需要登录态 / JS 才能读的来源：服务端**不去绕过**，封面手动传、是否还在只能点开看。
+# 这两个域名连出网白名单都没进。
+MANUAL_PROVIDERS = query.MANUAL_COVER_PROVIDERS
 # 允许访问的图片域名（前导点 = 按域名边界做后缀匹配）
 IMAGE_HOSTS = ("i.ytimg.com", ".hdslb.com", ".vimeocdn.com")
 # 自检用：每个白名单项挑一个具体主机来探测（我们只可能连这些）
@@ -294,6 +301,8 @@ def plan(provider: str, src: str) -> dict:
         raise ThumbError("本地视频不需要抓取封面")
     if provider == "embed":
         raise ThumbError("「其它外链」没有统一的缩略图规则，请手动上传一张封面")
+    if provider in MANUAL_PROVIDERS:
+        raise ThumbError(query.cover_fetch_hint(provider))
 
     video_id = query.video_id(provider, src)
     if not video_id:
@@ -337,6 +346,10 @@ def probe_target(provider: str, src: str) -> dict:
         raise ThumbError("「其它外链」无法自动判断，请自行确认")
     if provider in ("", "file"):
         raise ThumbError("本地视频不需要检查外链")
+    if provider in MANUAL_PROVIDERS:
+        # 页面需要登录 / JS 才能读：连"这条还能不能看"都判断不了，只能请作者点开确认
+        raise ThumbError(f"{query.provider_label(provider)}不提供公开接口，服务端无法自动判断，"
+                         f"请自己点开确认一下")
 
     info = plan(provider, src)
     if info["provider"] == "youtube":

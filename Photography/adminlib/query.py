@@ -51,7 +51,19 @@ PROVIDER_LABELS = {
     "youtube": "YouTube",
     "bilibili": "哔哩哔哩",
     "vimeo": "Vimeo",
+    "douyin": "抖音",
+    "xiaohongshu": "小红书",
     "embed": "其它外链",
+}
+
+# 这两个站的页面需要登录态或 JS 才能读到内容（分享链接里的小红书 `xsec_token` 也是这个原因），
+# 服务端**不去绕过它们**：不请求它们的域名，封面自己传一张，是否还在只能点开看。
+# 好处是「保证能点开」——抖音的短链、小红书的分享链接都原样保留，不做二次加工。
+MANUAL_COVER_PROVIDERS = ("douyin", "xiaohongshu")
+
+COVER_FETCH_HINTS = {
+    "douyin": "抖音页面需要 JS 才能读取，服务端抓不到封面，请手动上传一张（或用手机截图）",
+    "xiaohongshu": "小红书页面需要登录，服务端抓不到封面，请手动上传一张（或用手机截图）",
 }
 
 PUBLIC_SORTS = [
@@ -170,6 +182,15 @@ _ID_PATTERNS = {
         re.compile(r"[?&]aid=(\d+)", re.I),
     ],
     "vimeo": [re.compile(r"vimeo\.com/(?:video/)?(\d{5,})", re.I)],
+    "douyin": [
+        re.compile(r"/video/(\d{5,})", re.I),
+        re.compile(r"/note/(\d{5,})", re.I),             # 图文帖也走同一个 id 形态
+        re.compile(r"[?&](?:vid|modal_id)=(\d{5,})", re.I),
+    ],
+    "xiaohongshu": [
+        re.compile(r"/(?:explore|discovery/item|item)/([0-9a-f]{16,32})", re.I),
+        re.compile(r"[?&]noteId=([0-9a-f]{16,32})", re.I),
+    ],
 }
 
 
@@ -197,20 +218,24 @@ def video_id(provider: str, raw: str) -> str:
 
 
 # 「来源」是按链接自动认出来的，作者不用手选：填错来源会让后面的逻辑（自动抓封面、
-# 跳原站、资源检查）全部对不上号。认得的站与别名（短链 b23.tv 也算 B 站）。
+# 跳原站、资源检查）全部对不上号。认得的站与别名（短链 v.douyin.com / xhslink.com 也算）。
 PROVIDER_HOSTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bilibili", ("bilibili.com", "b23.tv", "acg.tv")),
     ("youtube", ("youtube.com", "youtube-nocookie.com", "youtu.be")),
     ("vimeo", ("vimeo.com",)),
+    ("douyin", ("douyin.com", "iesdouyin.com")),          # v.douyin.com 也在 douyin.com 之下
+    ("xiaohongshu", ("xiaohongshu.com", "xhslink.com")),
 )
 
 # 站内直接播放的文件后缀（自己托管的直链 mp4 也算「本地视频」，用 <video> 播）
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".ogv", ".ts")
 
-# 认出来但做不了服务商特有能力时的说明（现在是 B 站短链：解跳转要联网，我们不做出网站外请求）
+# 认出来但做不了服务商特有能力时的说明（短链要联网解跳转，我们不做出网站外请求）
 _SHORT_LINK_HINT = {
     "b23.tv": "这是哔哩哔哩的短链（b23.tv）：服务端不去解跳转，自动抓封面与链接检查都用不了，"
               "请换成完整的视频链接或直接填 BV 号",
+    "v.douyin.com": "这是抖音短链：服务端不去解跳转，识别不出视频 ID（封面手动传、点开跳转都正常）",
+    "xhslink.com": "这是小红书短链：服务端不去解跳转，识别不出笔记 ID（封面手动传、点开跳转都正常）",
 }
 
 _DOMAIN_RE = re.compile(r"^[\w-]+(?:\.[\w-]+)+$")
@@ -266,9 +291,15 @@ def detect_provider(raw: str) -> str:
     | `assets/video/x.mp4`、`https://cdn.example.com/x.mp4` | `file` |
     | 含 `bilibili.com` / `b23.tv` 的链接、`BV...`、`av123` | `bilibili` |
     | 含 `youtube.com` / `youtu.be` 的链接、11 位 ID | `youtube` |
-    | 含 `vimeo.com` 的链接、纯数字 ID | `vimeo` |
+    | 含 `vimeo.com` 的链接、5~12 位数字 ID | `vimeo` |
+    | 含 `douyin.com` / `iesdouyin.com` / `v.douyin.com` 的链接、13 位以上数字 ID | `douyin` |
+    | 含 `xiaohongshu.com` / `xhslink.com` 的链接、16~32 位十六进制 ID | `xiaohongshu` |
     | 其它链接（含没写 scheme 的域名） | `embed`（其它外链） |
     | 其它像路径的文本 | `file` |
+
+    > 抖音 / 小红书的裸 ID 与 Vimeo 的裸 ID 形状不同（前者 19 位数字 / 一段十六进制，
+    > 后者 8~10 位数字），所以能分得开；但**建议直接贴完整链接** ——
+    > 小红书的分享链接带 `xsec_token`，那样点开才不需要登录。
     """
     src = text(raw)
     if not src:
@@ -301,9 +332,15 @@ def detect_provider(raw: str) -> str:
         return "bilibili"
     if _suffix_of(src) in VIDEO_SUFFIXES or _looks_like_path(src):
         return "file"
+    # 裸 ID 的形状：抖音是 19 位数字，小红书是 24 位十六进制。两者都可能「全是数字」，
+    # 所以按长度让开 —— 24 位判给小红书（那是笔记 ID 的固定长度），其余长数字判给抖音。
+    if re.fullmatch(r"\d{13,}", src) and len(src) != 24:
+        return "douyin"
+    if re.fullmatch(r"[0-9a-f]{16,32}", src, re.I):
+        return "xiaohongshu"
     if re.fullmatch(r"[\w-]{11}", src):        # YouTube 的 ID 正好 11 位
         return "youtube"
-    if re.fullmatch(r"\d{5,}", src):           # Vimeo 的 ID 是纯数字
+    if re.fullmatch(r"\d{5,}", src):           # Vimeo 的 ID 是纯数字（8~10 位）
         return "vimeo"
     return "file"
 
@@ -322,8 +359,14 @@ def describe_source(raw: str) -> dict:
         note = "按本地文件处理：站内用播放器直接播放，不需要封面"
     elif provider == "embed" and not note:
         note = "认不出是哪个站，按「其它外链」处理：封面要自己上传，点卡片会跳到这个地址"
-    elif provider == "bilibili" and not _SHORT_LINK_HINT.get(host):
+    elif provider == "bilibili" and not note:
         note = "点卡片会跳到 B 站视频页"
+    elif provider == "douyin" and not note:
+        note = "抖音：封面要自己上传；点卡片会跳到抖音的播放页"
+    elif provider == "xiaohongshu" and not note:
+        note = ("小红书：封面要自己上传；点卡片会跳到原文"
+                + ("" if "xsec_token" in src else "（没带 xsec_token 时小红书可能要登录才能看，"
+                                                  "建议直接贴 App 里的分享链接）"))
     return {
         "src": src,
         "provider": provider,
@@ -331,7 +374,22 @@ def describe_source(raw: str) -> dict:
         "videoId": video_id(provider, src) if provider not in ("", "file", "embed") else "",
         "watchUrl": watch_url(provider, src) if provider and provider != "file" else "",
         "note": note,
+        "fetchNote": cover_fetch_hint(provider),
     }
+
+
+def cover_fetch_hint(provider: str) -> str:
+    """为什么抓 / 不抓封面（表单按钮上那句 tooltip；能抓的返回空串）。"""
+    provider = text(provider).lower()
+    if provider in COVER_FETCH_HINTS:
+        return COVER_FETCH_HINTS[provider]
+    if provider == "file":
+        return "本地视频不需要抓封面"
+    if provider == "embed":
+        return "不认识的站没有统一的缩略图规则，请手动上传一张"
+    if provider in ("youtube", "bilibili", "vimeo"):
+        return ""
+    return "这个来源抓不到封面，请手动上传一张"
 
 
 def embed_url(provider: str, raw: str) -> str:
@@ -380,6 +438,21 @@ def watch_url(provider: str, raw: str) -> str:
     if not src or provider in ("", "file"):
         return ""
 
+    parts = urllib.parse.urlsplit(src)
+    is_link = parts.scheme in ("http", "https") and bool(parts.netloc)
+
+    # 抖音 / 小红书：页面通常**必须带分享参数**才能打开（小红书的 `xsec_token` 就是干这个的），
+    # 所以给了完整链接就原样用，别自作聪明换成「规范地址」—— 那会把参数丢掉、点开变成登录页。
+    if provider in MANUAL_COVER_PROVIDERS:
+        if is_link:
+            return src
+        video = video_id(provider, src)          # 只填了裸 ID：拼规范地址
+        if video and provider == "douyin":
+            return f"https://www.douyin.com/video/{video}"
+        if video:
+            return f"https://www.xiaohongshu.com/explore/{video}"
+        return ""
+
     video = video_id(provider, src)
     if video:
         if provider == "youtube":
@@ -390,8 +463,7 @@ def watch_url(provider: str, raw: str) -> str:
         if provider == "vimeo":
             return f"https://vimeo.com/{video}"
 
-    parts = urllib.parse.urlsplit(src)
-    if parts.scheme in ("http", "https") and parts.netloc:
+    if is_link:
         return src
     return ""
 
@@ -988,6 +1060,6 @@ __all__ = [
     "exif_rows", "exif_summary", "facets", "friendly_date", "gallery_payload",
     "human_size", "is_embed", "is_remote", "matches", "media_card", "media_detail",
     "media_items", "normalize_media", "paginate", "parse_duration", "parse_int",
-    "provider_label", "query_media", "search_terms", "site_payload", "site_stats",
+    "provider_label", "cover_fetch_hint", "query_media", "search_terms", "site_payload", "site_stats",
     "sort_media", "store", "text", "video_id",
 ]
