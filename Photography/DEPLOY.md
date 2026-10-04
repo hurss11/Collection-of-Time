@@ -406,10 +406,11 @@ journalctl -u photography-admin -f
 sudo systemctl restart photography-admin
 ```
 
-> **不想让服务出网**（外链封面自动抓取是唯一的出网点）：在单元文件里加
+> **不想让服务出网**（外链封面自动抓取与外链状态检查是仅有的出网点）：在单元文件里加
 > `Environment=COT_NO_NET_FETCH=1`（或给 `ExecStart` 加 `--no-net-fetch`），
 > `systemctl daemon-reload && sudo systemctl restart photography-admin`。
-> 之后抓取接口直接回 400，后台也不再显示「自动获取封面」按钮 —— 封面请手动上传。
+> 之后抓取接口与检查接口都直接回 400，后台也不再显示「自动获取封面」按钮 ——
+> 封面请手动上传，外链是否还有效只能自己点开看。
 
 > **从旧版本升级过来的必做一步**：老单元文件里没有内存约束。升级代码后重新生成一次单元文件
 > 并重载，否则这次的内存加固只在代码层生效、没有兜底：
@@ -592,6 +593,8 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 更新后服务起不来 | 已自动回滚并重新拉起，看 `./run.sh logs 80` 定位这次发布的问题；回滚记录在 `.run/autoupdate.state` |
 | 外链视频存不进去，说「自动抓取失败」 | 先在服务器上跑 `./run.sh net-check`：多半是这台机器连不上服务商（海外机房连不上 B 站、不少机房连不上 YouTube）。手动上传一张封面即可；确认不需要自动抓取就用 `--no-net-fetch` 跑 |
 | 「自动获取封面」按钮不显示 | `/api/schema` 里 `netFetch=false`，说明启动时带了 `--no-net-fetch`（或设了 `COT_NO_NET_FETCH=1`） |
+| 外链视频存不进去，说「这个链接已经不可用了」 | 服务端按你的命令问了一次服务商官方接口，对方明确回答「不存在 / 不可见」——这条链接确实打不开了，换一条或先自己点开确认。只是「未确认」时不会拦，只弹提示 |
+| 想知道哪条外链已经打不开 | 后台「视频」页右上角 **「检查外链」**，或服务器上跑 `./run.sh link-check`（有已失效条目时退出码 1，可挂 cron）。结果写在 `.run/link-status.json`，不进 `data/`、不随备份走 |
 | 日志里成片的 `客户端连接空闲 N 秒无数据，已断开` | 浏览器留下的 keep-alive 连接 120 秒没发数据，被服务端收掉——正常现象，不是错误。老版本这里写的是标准库原文 `Request timed out: TimeoutError('timed out')`，容易被误读成「抓外网超时」或「FFmpeg 超时」；与外链抓取、FFmpeg 都无关 |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。

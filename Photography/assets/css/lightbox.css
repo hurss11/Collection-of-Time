@@ -70,29 +70,16 @@
   outline: none;
 }
 
-/* ---------- 视频：外链 iframe 嵌入 ---------- */
-
-.lightbox__embed {
-  width: min(100%, 1280px);
-  aspect-ratio: 16 / 9;
-  max-height: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  background: #000;
-}
-
 /* ---------- 媒体自适应 ---------- */
 
-/* 照片/视频/嵌入框统一「盒子贴合画面」的尺寸算法：绝对定位 + inset:0 + margin:auto，
+/* 照片/视频统一「盒子贴合画面」的尺寸算法：绝对定位 + inset:0 + margin:auto，
    再用百分比 max-* 把画面收进容器。百分比在这里能算出确定值，因为绝对定位子项的
    包含块（.lightbox__viewport 的 padding box）高度是确定的。
    不要改回常规流的 max-height:100%：百分比高度在网格里会被当成 auto，
    视频/图片按宽度撑高后超出容器，底部被 overflow:hidden 裁掉 ——
    浏览器原生控件条（进度条）正好在最底部，表现就是「卡片里拖不动进度条，全屏才行」。 */
 .lightbox__image,
-.lightbox__video,
-.lightbox__embed {
+.lightbox__video {
   position: absolute;
   inset: 0;
   margin: auto;
@@ -397,8 +384,6 @@
 
   .lightbox__image,
   .lightbox__video { max-width: 100%; max-height: 100%; border-radius: var(--radius-sm); }
-
-  .lightbox__embed { width: 100%; }
 
   .lightbox__caption {
     grid-template-columns: 1fr;

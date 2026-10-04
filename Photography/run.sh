@@ -13,6 +13,7 @@
 #   ./run.sh doctor         环境自检（Python / FFmpeg / 目录权限 / JSON / 端口）
 #   ./run.sh install-ffmpeg 下载 FFmpeg 静态构建到 bin/（随项目打包到服务器）
 #   ./run.sh net-check      自检外链封面抓取所需的域名能否连上
+#   ./run.sh link-check     检查外链视频是否还能打开
 #   ./run.sh package        打成可迁移到服务器的 tar.gz（含 FFmpeg，默认 linux-x64）
 #   ./run.sh create-user    创建管理员账号
 #   ./run.sh reset-password 重置管理员密码
@@ -1591,6 +1592,7 @@ Photography 一键运行脚本
   ./run.sh install-ffmpeg  下载 FFmpeg 静态构建到 bin/（随项目打包到服务器）
   ./run.sh ffmpeg-status   查看当前使用的是哪个 ffmpeg
   ./run.sh net-check       自检：外链封面抓取要用的域名能不能连上（出网问题一眼看清）
+  ./run.sh link-check      检查外链视频是否还能打开（有失效的会以非 0 退出）
   ./run.sh package         打包迁移到服务器：dist/photography-<平台>-<时间>.tar.gz
   ./run.sh create-user     创建管理员账号
   ./run.sh reset-password  重置管理员密码
@@ -1659,6 +1661,7 @@ main() {
     update-check|autoupdate|auto-update|notify) update_check "$@" ;;
     adopt|takeover) adopt "$@" ;;
     net-check)      require_python; py admin.py --net-status ;;
+    link-check)     require_python; py admin.py --check-links ;;
     https|https-proxy|ssl) https "$@" ;;
     help|-h|--help) usage ;;
     *)              err "未知命令：$command"; info ""; usage; exit 2 ;;

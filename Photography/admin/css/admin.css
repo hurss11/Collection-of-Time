@@ -259,6 +259,10 @@
 .badge--file { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .badge--embed { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
 .badge--missing { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+/* 外链视频的「资源是否还在」 */
+.badge--ok { color: var(--ok, var(--accent)); border-color: color-mix(in srgb, var(--ok, var(--accent)) 40%, var(--border)); }
+.badge--danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.badge--muted { color: var(--text-mute); border-color: var(--border); }
 
 /* ============================================================
    上传

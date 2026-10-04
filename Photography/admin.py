@@ -50,7 +50,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, multipart, query, ranges, schema, store, thumbs, videometa    # noqa: E402
+from adminlib import auth, linkcheck, media, multipart, query, ranges, schema, store, thumbs, videometa    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -242,7 +242,7 @@ def public_csp(connect_src: str = "'self'") -> str:
         "style-src 'self'",
         "img-src 'self' data: https: http:",
         "media-src 'self' https: http:",
-        "frame-src https: http:",              # 外链视频播放器
+        "frame-src 'none'",                    # 站内不再嵌套任何 iframe（外链视频改为跳原站）
         f"connect-src {connect_src}",
         "font-src 'self'",
         "frame-ancestors 'self'",
@@ -878,6 +878,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.api_asset_thumb()
             return
 
+        if head == "assets" and method == "POST" and len(segments) >= 2 and segments[1] == "check-links":
+            self.api_check_links()
+            return
+
         if head == "item" and method == "GET":
             self.api_item(segments[1:])
             return
@@ -1329,6 +1333,25 @@ class Handler(SimpleHTTPRequestHandler):
             "item": raw,
         })
 
+    def _check_external_link(self, item: dict, warnings: list[str]) -> dict:
+        """保存外链视频时检查「资源还在不在」。
+
+        返回检查结果（用于给 `src` 加字段级错误）；`unknown` 会把原因作为警告带出去，
+        但没有 `NET_FETCH` 或本地视频时不做任何事。
+        """
+        if not NET_FETCH:
+            return {}
+        provider = query.text(item.get("provider")) or "file"
+        src = query.text(item.get("src"))
+        if provider == "file" or not src:
+            return {}
+        result = linkcheck.check(provider, src, budget=thumbs.AUTOFILL_TIMEOUT)
+        if not result:
+            return {}
+        if result["status"] == "unknown":
+            warnings.append(f"链接状态未确认：{result['message']}")
+        return result
+
     def _autofill_external_cover(self, item: dict) -> tuple[str, str]:
         """外链视频没填封面就试着自动抓一张。返回 (相对路径, 失败原因)；成功时原因是空串。"""
         if not NET_FETCH:
@@ -1365,7 +1388,16 @@ class Handler(SimpleHTTPRequestHandler):
                 item["poster"] = poster
                 cover_note = ""
 
+        # 「这个链接还能打开吗」：接口明确说不存在就拦下；网络不通只提示，别让抖动挡住保存
+        link_result: dict = {}
+        link_warnings: list[str] = []
+        if collection == "videos":
+            link_result = self._check_external_link(item, link_warnings)
+
         errors = schema.validate(collection, item)
+        if link_result.get("status") == "gone":
+            errors.append({"field": "src",
+                           "message": f"这个链接已经不可用了：{link_result.get('message', '')}"})
         if errors and cover_note:
             # 把「为什么没抓到」补进封面那条错误里，否则用户只看到「必须填写封面图」
             for error in errors:
@@ -1388,6 +1420,17 @@ class Handler(SimpleHTTPRequestHandler):
             saved, warnings = STORE.upsert(collection, item)
         except store.StoreError as exc:
             raise ApiError(str(exc)) from exc
+        # 「链接状态未确认」这类提醒要跟落盘时产生的提醒一起返回给前端
+        warnings = link_warnings + list(warnings or [])
+
+        # 记下这次检查结果（后台列表与前台卡片据此显示「可访问 / 已失效 / 未确认」）；
+        # 原来是外链、现在改成本地文件的，顺手把旧状态清掉，免得列表里留着过期角标
+        if collection == "videos":
+            saved_id = query.text(saved.get("id"))
+            if link_result:
+                linkcheck.record(saved_id, link_result)
+            elif query.text(saved.get("provider")) in ("", "file"):
+                linkcheck.record(saved_id, {})
 
         # 换过封面就清掉被替换的那张，免得 assets/video/posters/ 越积越多
         if collection == "videos" and item_id:
@@ -1874,8 +1917,21 @@ class Handler(SimpleHTTPRequestHandler):
             "embedUrl": cover["embedUrl"],
         })
 
-    # ---------- 备份 ----------
+    def api_check_links(self) -> None:
+        """批量检查所有外链视频的「资源还在不在」（`POST /api/assets/check-links`）。
 
+        站内不播放外链，只保存链接、封面与这份检查结果；所以作者需要偶尔点一下这里，
+        知道哪条已经打不开了。逐条走服务商官方接口，结果写进 `.run/link-status.json`。
+        """
+        if not NET_FETCH:
+            raise ApiError("服务端已关闭出网（--no-net-fetch），无法检查外链状态")
+        report = linkcheck.check_all(STORE.load("videos"), budget=thumbs.AUTOFILL_TIMEOUT)
+        counts = report["counts"]
+        remember("检查外链", f"可访问 {counts['ok']} / 已失效 {counts['gone']} / "
+                             f"未确认 {counts['unknown']}")
+        self.send_json({"ok": True, "counts": counts, "results": report["results"]})
+
+    # ---------- 备份 ----------
     def api_backups(self, method: str, rest: list[str]) -> None:
         if method == "GET":
             self.send_json({
@@ -2396,6 +2452,33 @@ def command_net_status(timeout: float = 3.0) -> int:
     return 0
 
 
+def command_check_links() -> int:
+    """检查所有外链视频还能不能打开（不启动服务）。"""
+    videos = STORE.load("videos")
+    report = linkcheck.check_all(videos, budget=thumbs.AUTOFILL_TIMEOUT)
+    counts = report["counts"]
+
+    print("外链视频 · 资源是否还在")
+    if not NET_FETCH:
+        print("  注意：出网抓取已关闭（--no-net-fetch），下面只会得到「未确认」。")
+    print()
+    for item in videos:
+        item_id = query.text(item.get("id"))
+        provider = query.text(item.get("provider")) or "file"
+        if provider == "file":
+            continue
+        result = report["results"].get(item_id) or {}
+        mark = {"ok": "[在  ]", "gone": "[没了]", "unknown": "[未知]"}.get(result.get("status"), "[未查]")
+        print(f"  {mark} {item_id:8} {query.provider_label(provider):10} {query.text(item.get('title'))}")
+        print(f"            {query.watch_url(provider, query.text(item.get('src'))) or query.text(item.get('src'))}")
+        if result.get("message"):
+            print(f"            {result['message']}")
+    print()
+    print(f"  可访问 {counts['ok']} · 已失效 {counts['gone']} · 未确认 {counts['unknown']}"
+          f" · 非外链 {counts['skipped']}")
+    return 1 if counts["gone"] else 0
+
+
 def command_ffmpeg_status() -> int:
     """打印 FFmpeg 探测结果（不启动服务）。"""
     tools = media.detect_tools(ROOT, verify=True)
@@ -2449,6 +2532,8 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--net-status", action="store_true",
                         help="探测外链封面抓取所需的域名能否连上后退出")
+    parser.add_argument("--check-links", action="store_true",
+                        help="检查所有外链视频是否还能打开（写 .run/link-status.json）")
     parser.add_argument("--no-net-fetch", action="store_true",
                         help="禁止服务端出网抓取外链视频封面（离线部署用；仅白名单域名会被访问）")
     parser.add_argument("--print-systemd", action="store_true",
@@ -2494,6 +2579,8 @@ def main() -> int:
         return command_fetch_ffmpeg([])
     if args.net_status:
         return command_net_status()
+    if args.check_links:
+        return command_check_links()
 
     if args.print_systemd:
         print(systemd_unit(args.port, args.session_hours, args.memory_max))

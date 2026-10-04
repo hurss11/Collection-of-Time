@@ -1,10 +1,12 @@
 /**
  * lightbox.js —— 大图 / 视频查看器
  *
- * 三种媒体呈现方式全部由服务端字段决定：
- *   kind=photo                → <img src="srcUrl || imageUrl">
- *   kind=video & isEmbed      → <iframe src="embedUrl">
- *   kind=video & 本地文件      → <video src="srcUrl" poster="imageUrl">
+ * 两种媒体呈现方式全部由服务端字段决定：
+ *   kind=photo           → <img src="srcUrl || imageUrl">
+ *   kind=video & 本地文件 → <video src="srcUrl" poster="imageUrl">
+ *
+ * 外链视频**不进灯箱**：站内只保存链接、封面与「资源是否还在」的结果，
+ * 播放交给原站（卡片本身就是指向原站观看页的链接，见 gallery.js）。
  *
  * 只做「打开 / 关闭 / 上下张 / 键盘 / 焦点 / 缩放平移 / 参数渲染」，不做任何解析与格式化。
  */
@@ -37,7 +39,6 @@ function exifRowsHtml(rows) {
 export function createLightbox(root) {
   const imageEl = root.querySelector('#lb-image');
   const videoEl = root.querySelector('#lb-video');
-  const embedEl = root.querySelector('#lb-embed');
   const titleEl = root.querySelector('#lb-title');
   const subtitleEl = root.querySelector('#lb-subtitle');
   const descEl = root.querySelector('#lb-description');
@@ -83,33 +84,24 @@ export function createLightbox(root) {
     statusEl.innerHTML = html || '';
   }
 
-  /** 停止并卸载所有播放器，避免关闭后仍在后台播放 */
+  /** 停止并卸载播放器，避免关闭后仍在后台播放 */
   function resetMedia() {
     videoEl.pause();
     videoEl.removeAttribute('src');
     videoEl.load();
-    embedEl.removeAttribute('src');
   }
 
   /** 切换当前媒体的呈现方式（字段全部来自服务端） */
   function showMedia(item) {
     const isVideo = item.kind === VIDEO;
-    const isEmbed = isVideo && Boolean(item.embedUrl);
 
     imageEl.hidden = isVideo;
-    videoEl.hidden = !isVideo || isEmbed;
-    embedEl.hidden = !isEmbed;
+    videoEl.hidden = !isVideo;
     stageEl.classList.toggle('is-video', isVideo);
 
     if (!isVideo) {
       imageEl.src = item.srcUrl || item.imageUrl;
       imageEl.alt = item.title || '';
-      return;
-    }
-
-    if (isEmbed) {
-      embedEl.src = item.embedUrl;
-      embedEl.title = item.title || '';
       return;
     }
 

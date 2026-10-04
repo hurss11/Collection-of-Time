@@ -479,6 +479,25 @@ main {
   background: var(--accent);
 }
 
+/* 外链视频的角标：一个「↗」，说明点了会离开本站、去原站播放 */
+.play-badge--out {
+  width: 46px;
+  height: 46px;
+}
+
+.play-badge--out::after {
+  content: "↗";
+  border: 0;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
+  transform: none;
+}
+
 /* 时长角标 */
 .card__duration {
   position: absolute;
@@ -499,6 +518,8 @@ main {
 .card__title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .card__meta { font-size: 12px; color: var(--text-mute); display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
 .card__meta--date { font-variant-numeric: tabular-nums; }
+/* 外链视频：提示这一点会跳到原站，不在站内播放 */
+.card__meta--out { color: var(--accent); }
 
 .card__tags { display: flex; gap: 6px; flex-wrap: wrap; }
 

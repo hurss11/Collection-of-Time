@@ -220,6 +220,7 @@ export const api = {
   uploadCover: (form) => request('/api/assets/poster', { method: 'POST', form }),
   fetchThumb: (provider, src) =>
     request('/api/assets/thumb', { method: 'POST', json: { provider, src } }),
+  checkLinks: () => request('/api/assets/check-links', { method: 'POST', json: {} }),
   removeItem: (collection, id, withFile = false) =>
     request(`/api/items/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${withFile ? '/file' : ''}`, {
       method: 'DELETE',

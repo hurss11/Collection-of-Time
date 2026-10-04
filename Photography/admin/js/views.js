@@ -15,7 +15,7 @@ import { $, escapeHtml, humanSize } from './ui.js';
 export const PANE_META = {
   overview: ['概览', '数据来源：<code>data/*.json</code>'],
   photos: ['照片', '搜索 / 排序由服务端完成，编辑后逐条写回 <code>data/photos.json</code>'],
-  videos: ['视频', '本地文件与外链嵌入共用一份 <code>data/videos.json</code>'],
+  videos: ['视频', '本地文件与外链共用一份 <code>data/videos.json</code>；外链只存链接与封面'],
   albums: ['相册', '相册 id 被照片与视频引用'],
   upload: ['上传', '一次批量提交，服务端逐条返回结果'],
   backups: ['备份', '导出 / 导入 / 回滚历史版本'],
@@ -73,7 +73,8 @@ function renderCell(cell) {
     case 'tags':
       return taglist(cell.tags);
     case 'badge':
-      return `<span class="badge badge--${escapeHtml(cell.tone || 'file')}" title="${escapeHtml(cell.title || '')}">${escapeHtml(cell.text || '')}</span>`;
+      return `<span class="badge badge--${escapeHtml(cell.tone || 'file')}" title="${escapeHtml(cell.title || '')}">${escapeHtml(cell.text || '')}</span>`
+        + (cell.sub ? `<div class="cell-sub">${escapeHtml(cell.sub)}</div>` : '');
     case 'sub':
       return `<span class="cell-sub">${escapeHtml(cell.text || '')}</span>`;
     case 'muted':

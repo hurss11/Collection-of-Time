@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from pathlib import Path
 
 from . import store
@@ -228,6 +229,35 @@ def is_embed(provider: str) -> bool:
     return text(provider).lower() not in ("", "file")
 
 
+def watch_url(provider: str, raw: str) -> str:
+    """外链视频的**原站观看页**：站内不播放，点卡片就跳这里。
+
+    与 `embed_url()` 的区别：那个是给 iframe 用的嵌入地址，这个是给浏览器的普通链接
+    （YouTube 给 watch 页而不是 embed 页、B 站给视频页而不是播放器页）。
+    「其它外链」与认不出 ID 的情况：`src` 本身就是链接就用它 —— 但只放行
+    http/https，避免 `javascript:` 这类地址被写进 `href`。
+    """
+    provider = text(provider).lower()
+    src = text(raw)
+    if not src or provider in ("", "file"):
+        return ""
+
+    video = video_id(provider, src)
+    if video:
+        if provider == "youtube":
+            return f"https://www.youtube.com/watch?v={video}"
+        if provider == "bilibili":
+            return (f"https://www.bilibili.com/video/av{video[2:]}" if video.lower().startswith("av")
+                    else f"https://www.bilibili.com/video/{video}")
+        if provider == "vimeo":
+            return f"https://vimeo.com/{video}"
+
+    parts = urllib.parse.urlsplit(src)
+    if parts.scheme in ("http", "https") and parts.netloc:
+        return src
+    return ""
+
+
 def date_key(value: object) -> str:
     """把各种时间写法压成可比较的 "YYYY-MM-DDTHH:MM:SS"；认不出来返回空串。"""
     raw = text(value)
@@ -422,6 +452,12 @@ def media_card(item: dict, albums: dict[str, dict], root: Path) -> dict:
     """作品卡片：字段都算好，前端只做 HTML 拼接。"""
     is_video = item["kind"] == "video"
     embed = is_embed(item["provider"])
+    link_status: dict = {}
+    if is_video and embed:
+        # 延迟导入：linkcheck 要用 thumbs，而 thumbs 又 import 本模块，模块级导入会成环
+        from . import linkcheck
+
+        link_status = linkcheck.status_for(text(item.get("id")))
 
     # 视频只能用封面（poster）当图片：拿 mp4 当 <img> 只会碎图；
     # 照片用缩略图（没有 thumb 时 normalize 已回落到原图）。
@@ -451,6 +487,13 @@ def media_card(item: dict, albums: dict[str, dict], root: Path) -> dict:
         "provider": item["provider"],
         "providerLabel": provider_label(item["provider"]) if is_video else "",
         "embedUrl": embed_url(item["provider"], item["src"]) if is_video else "",
+        # 站内不播放外链：点卡片就跳这个「原站观看页」
+        "watchUrl": watch_url(item["provider"], item["src"]) if is_video else "",
+        "linkStatus": link_status.get("status", ""),
+        "linkStatusText": linkcheck.label(link_status) if is_video and embed else "",
+        "linkStatusTone": linkcheck.tone(link_status) if is_video and embed else "",
+        "linkStatusMessage": link_status.get("message", ""),
+        "linkCheckedAt": link_status.get("at", ""),
         "durationText": duration_text(item["duration"]) if is_video else "",
         "resolution": item["resolution"] if is_video else "",
         "exif": exif_rows(item, item["kind"]),
@@ -549,6 +592,7 @@ ADMIN_COLUMNS = {
         {"key": "thumb", "label": "封面"},
         {"key": "title", "label": "标题"},
         {"key": "provider", "label": "来源"},
+        {"key": "status", "label": "链接"},
         {"key": "duration", "label": "时长"},
         {"key": "resolution", "label": "分辨率"},
         {"key": "album", "label": "相册"},
@@ -594,6 +638,23 @@ def _admin_search_index(collection: str, raw: dict, album_name: str) -> str:
     return " ".join(text(part) for part in parts if part).lower()
 
 
+def _link_cell(raw: dict) -> dict:
+    """视频列表里的「链接」列：外链显示「资源是否还在」，本地文件不适用。"""
+    provider = text(raw.get("provider")) or "file"
+    if provider == "file":
+        return {"kind": "sub", "text": "本地文件"}
+    from . import linkcheck
+
+    result = linkcheck.status_for(text(raw.get("id")))
+    if not result:
+        return {"kind": "sub", "text": "未检查", "title": "点上方「检查外链」可批量确认"}
+    text_value = linkcheck.label(result)
+    when = text(result.get("at"))[11:16]
+    return {"kind": "badge", "text": text_value, "tone": linkcheck.tone(result),
+            "title": f"{text(result.get('message'))}（{text(result.get('at'))}）",
+            "sub": f"{when} 检查" if when else ""}
+
+
 def admin_rows(collection: str, raw_items: list[dict], albums: list[dict],
                media_counts: dict[str, int] | None = None, *, root: Path) -> list[dict]:
     lookup = album_lookup(albums)
@@ -622,6 +683,7 @@ def admin_rows(collection: str, raw_items: list[dict], albums: list[dict],
                 {"kind": "title", "text": text(raw.get("title")) or "未命名", "sub": item_id},
                 {"kind": "badge", "text": provider, "tone": "file" if provider == "file" else "embed",
                  "title": provider_label(provider)},
+                _link_cell(raw),
                 {"kind": "sub", "text": duration_text(parse_duration(raw.get("duration"))) or "–"},
                 {"kind": "sub", "text": text(raw.get("resolution")) or "–"},
                 {"kind": "text", "text": album_name},

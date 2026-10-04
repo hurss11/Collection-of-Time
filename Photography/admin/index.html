@@ -151,7 +151,9 @@
                placeholder="搜索标题 / 来源 / 标签…（服务端搜索）" />
         <select class="input toolbar__sort" id="sort-videos" aria-label="排序"></select>
         <button class="btn" data-action="add" data-collection="videos" type="button">＋ 新增视频</button>
+        <button class="btn" data-action="check-links" type="button" title="请求原站接口，确认外链视频是否还在">检查外链</button>
       </div>
+      <p class="muted toolbar-note">外链视频只保存链接与封面，站内不播放；点前台卡片会跳到原站。</p>
       <div class="table-wrap"><table class="table" id="table-videos"></table></div>
     </section>
 

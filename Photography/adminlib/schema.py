@@ -64,7 +64,7 @@ FIELDS: dict[str, list[dict]] = {
         {"key": "src", "label": "文件路径 / 视频链接 / BV 号", "type": "text", "mono": True,
          "placeholder": "assets/video/xxx.mp4 或 BV1xxxxxxxxx"},
         {"key": "poster", "label": "封面图", "type": "text", "mono": True, "upload": "poster",
-         "hint": "外链视频必填：跨域 iframe 无法自动抓帧。可以点旁边的按钮直接上传一张"},
+         "hint": "外链视频必填：卡片上显示的就是这张图（留空会尝试自动获取）。也可以点旁边的按钮上传一张"},
         {"key": "posterTime", "label": "抓帧时间（秒）", "type": "number"},
         {"key": "duration", "label": "时长（秒）", "type": "number"},
         {"key": "resolution", "label": "分辨率", "type": "text", "placeholder": "3840 × 2160"},
@@ -245,7 +245,7 @@ def validate(collection: str, item: dict) -> list[dict[str, str]]:
         else:
             # 外链少了 src 会存出一条「点开什么都没有」的假视频（前台只能显示未配置 src）
             require("src", "外链视频必须填写视频链接或 BV 号")
-            require("poster", "外链视频必须填写封面图（跨域 iframe 无法自动抓帧）")
+            require("poster", "外链视频必须填写封面图（站内不播放，卡片上显示的就是这张图）")
 
     return errors
 

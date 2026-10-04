@@ -18,11 +18,12 @@ function mediaMarkup(item) {
                loading="lazy" decoding="async" data-lazy />`;
 }
 
-/** 服务端标记的缺失角标（封面缺失 / 视频文件缺失） */
+/** 服务端标记的缺失角标（封面缺失 / 视频文件缺失 / 外链已失效） */
 function flagsMarkup(item) {
   const flags = [];
   if (item.imageMissing) flags.push('图缺失');
   if (item.kind === VIDEO && item.srcMissing) flags.push('文件缺失');
+  if (item.kind === VIDEO && item.linkStatus === 'gone') flags.push('链接已失效');
   if (!flags.length) return '';
   return `<span class="card__flags">${flags
     .map((text) => `<span class="card__flag">${escapeHtml(text)}</span>`)
@@ -49,14 +50,26 @@ function cardMarkup(item) {
     ? `<span class="card__meta card__meta--date">${escapeHtml(item.dateText)}</span>`
     : '';
 
+  // 外链视频站内不播放：整张卡片就是一个指向原站观看页的链接，点了新标签打开。
+  // index.html 的 CSP 里 frame-src 还留着，但页面已经不再嵌任何 iframe。
+  const link = isVideo && item.watchUrl
+    ? `<a class="card__trigger" href="${escapeHtml(item.watchUrl)}"
+          target="_blank" rel="noopener noreferrer"
+          aria-label="在${escapeHtml(item.providerLabel || '原站')}打开《${escapeHtml(item.title)}》">`
+    : `<button class="card__trigger" type="button" data-open="${escapeHtml(item.id)}"
+          aria-label="${isVideo ? '播放' : '查看'}《${escapeHtml(item.title)}》">`;
+  const closer = isVideo && item.watchUrl ? '</a>' : '</button>';
+  const mediaInside = isVideo && item.watchUrl
+    ? '<span class="play-badge play-badge--out" aria-hidden="true"></span>'
+    : (isVideo ? '<span class="play-badge" aria-hidden="true"></span>' : '');
+
   return `
     <article class="card${isVideo ? ' card--video' : ''}" role="listitem" data-id="${escapeHtml(item.id)}">
-      <button class="card__trigger" type="button" data-open="${escapeHtml(item.id)}"
-              aria-label="${isVideo ? '播放' : '查看'}《${escapeHtml(item.title)}》">
+      ${link}
         <div class="card__media">
           ${mediaMarkup(item)}
           ${item.albumName ? `<span class="card__badge">${escapeHtml(item.albumName)}</span>` : ''}
-          ${isVideo ? '<span class="play-badge" aria-hidden="true"></span>' : ''}
+          ${mediaInside}
           ${isVideo && item.durationText ? `<span class="card__duration">${escapeHtml(item.durationText)}</span>` : ''}
           ${flagsMarkup(item)}
         </div>
@@ -66,8 +79,9 @@ function cardMarkup(item) {
           ${summary}
           ${date}
           ${tagsMarkup(item.tags)}
+          ${isVideo && item.watchUrl ? `<span class="card__meta card__meta--out">${escapeHtml(item.providerLabel || '原站')}打开 ↗</span>` : ''}
         </div>
-      </button>
+      ${closer}
     </article>`;
 }
 

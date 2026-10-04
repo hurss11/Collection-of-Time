@@ -43,8 +43,8 @@ TOTAL_TIMEOUT = 12                   # 整次抓取的全局预算（秒）：�
 AUTOFILL_TIMEOUT = 6                 # 保存表单时自动抓取的预算：短一点，别让人干等
 MAX_HOPS = 3
 
-# 允许访问的「元信息」接口
-META_HOSTS = ("api.bilibili.com", "vimeo.com")
+# 允许访问的「元信息」接口（视频还在不在、缩略图地址）
+META_HOSTS = ("api.bilibili.com", "vimeo.com", "www.youtube.com")
 # 允许访问的图片域名（前导点 = 按域名边界做后缀匹配）
 IMAGE_HOSTS = ("i.ytimg.com", ".hdslb.com", ".vimeocdn.com")
 # 自检用：每个白名单项挑一个具体主机来探测（我们只可能连这些）
@@ -324,6 +324,42 @@ def plan(provider: str, src: str) -> dict:
     }
 
 
+def probe_target(provider: str, src: str) -> dict:
+    """「这个视频还在吗」要问的地址（官方接口，全在白名单内）。
+
+    与 `plan()` 的区别：抓封面时 YouTube 用的是固定缩略图地址，而判断存在与否要问
+    oEmbed 接口。返回 `{"kind", "label", "videoId", "url", "headers"}`。
+    """
+    provider = query.text(provider).lower()
+    if provider == "embed":
+        raise ThumbError("「其它外链」无法自动判断，请自行确认")
+    if provider in ("", "file"):
+        raise ThumbError("本地视频不需要检查外链")
+
+    info = plan(provider, src)
+    if info["provider"] == "youtube":
+        # plan() 给 YouTube 的 kind 是 "image-direct"（抓封面走固定缩略图地址），
+        # 但「还在不在」要问 oEmbed 接口，所以这里按 provider 判断而不是 kind
+        watch = urllib.parse.quote(f"https://www.youtube.com/watch?v={info['videoId']}", safe="")
+        return {
+            "kind": "youtube",
+            "label": info["label"],
+            "videoId": info["videoId"],
+            "url": f"https://www.youtube.com/oembed?url={watch}&format=json",
+            "headers": {"Accept": "application/json"},
+        }
+
+    target = info["targets"][0][1]
+    headers = {"Referer": "https://www.bilibili.com/"} if info["kind"] == "bilibili" else None
+    return {
+        "kind": info["kind"],
+        "label": info["label"],
+        "videoId": info["videoId"],
+        "url": target,
+        "headers": headers,
+    }
+
+
 def _image_from_meta(plan_info: dict, *, deadline: float | None = None) -> tuple[str, tuple[str, ...]]:
     """问官方接口要缩略图地址（B 站 / Vimeo）。返回 (图片地址, 允许的域名)。"""
     kind = plan_info["kind"]
@@ -405,6 +441,6 @@ def fetch_cover(provider: str, src: str, *, budget: float = TOTAL_TIMEOUT) -> di
     return _with_deadline(lambda: _fetch(info, deadline, limit), limit)
 
 
-__all__ = ["ThumbError", "check_url", "image_suffix", "plan", "fetch_cover", "connectivity",
-           "META_HOSTS", "IMAGE_HOSTS", "PROBE_HOSTS", "MAX_BYTES", "MIN_BYTES",
+__all__ = ["ThumbError", "check_url", "image_suffix", "plan", "probe_target", "fetch_cover",
+           "connectivity", "META_HOSTS", "IMAGE_HOSTS", "PROBE_HOSTS", "MAX_BYTES", "MIN_BYTES",
            "TOTAL_TIMEOUT", "AUTOFILL_TIMEOUT"]

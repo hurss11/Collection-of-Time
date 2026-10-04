@@ -132,6 +132,25 @@ async function refreshTable(collection) {
   }
 }
 
+/** 批量确认外链视频是否还打得开（服务端去问服务商官方接口） */
+async function checkExternalLinks(button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '检查中…';
+  try {
+    const payload = await api.checkLinks();
+    const counts = payload.counts || {};
+    await refreshTable('videos');
+    const summary = `可访问 ${counts.ok || 0} / 已失效 ${counts.gone || 0} / 未确认 ${counts.unknown || 0}`;
+    toast(`外链检查完成：${summary}`, counts.gone ? 'warn' : 'ok', 6000);
+  } catch (error) {
+    toast(error.message, 'err', 6000);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 /* ============================================================
    条目编辑
    ============================================================ */
@@ -641,6 +660,12 @@ function bindEvents() {
     const add = event.target.closest('[data-action="add"]');
     if (add) {
       openEditor(add.dataset.collection, null, true);
+      return;
+    }
+
+    const checkLinks = event.target.closest('[data-action="check-links"]');
+    if (checkLinks) {
+      checkExternalLinks(checkLinks);
       return;
     }
 

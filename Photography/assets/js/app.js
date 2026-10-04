@@ -225,11 +225,14 @@ function bindEvents() {
   });
 
   // 作品网格（事件委托）→ 打开灯箱
+  // 外链视频的卡片是 <a target=_blank>（站内不播放，点了直接去原站），
+  // 它们不带 data-open，所以下面这段自然会跳过它们；灯箱里也只用「站内能放」的条目。
   el.gallery.addEventListener('click', (event) => {
     const id = resolveCardId(event);
     if (!id) return;
-    const at = state.items.findIndex((item) => item.id === id);
-    if (at >= 0) lightbox.open(state.items, at);
+    const viewable = state.items.filter((item) => !item.isEmbed);
+    const at = viewable.findIndex((item) => item.id === id);
+    if (at >= 0) lightbox.open(viewable, at);
   });
 
   // 分页：加载下一页（页码由服务端 meta 驱动）
