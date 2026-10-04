@@ -165,9 +165,34 @@ _ID_PATTERNS = {
     "bilibili": [
         re.compile(r"/video/(BV[\w]{6,})", re.I),
         re.compile(r"[?&]bvid=(BV[\w]{6,})", re.I),
+        re.compile(r"/video/av(\d+)", re.I),            # 老式的 av 号，取到数字后统一加 av 前缀
+        re.compile(r"[?&]aid=(\d+)", re.I),
     ],
     "vimeo": [re.compile(r"vimeo\.com/(?:video/)?(\d{5,})", re.I)],
 }
+
+
+def video_id(provider: str, raw: str) -> str:
+    """从链接或裸 ID 里取视频标识；取不出来返回空串。
+
+    B 站的 av 号统一成 `av123` 的形式返回，调用方据此决定用 `aid=` 还是 `bvid=`。
+    """
+    provider = text(provider).lower()
+    src = text(raw)
+    if not src or provider in ("", "file", "embed"):
+        return ""
+    for pattern in _ID_PATTERNS.get(provider, []):
+        matched = pattern.search(src)
+        if matched:
+            found = matched.group(1)
+            if provider == "bilibili" and found.isdigit():
+                return f"av{found}"
+            return found
+    if provider == "bilibili" and re.fullmatch(r"av\d+", src, re.I):
+        return src.lower()
+    if re.fullmatch(r"[\w-]{6,}", src):
+        return src
+    return ""
 
 
 def embed_url(provider: str, raw: str) -> str:
@@ -177,24 +202,20 @@ def embed_url(provider: str, raw: str) -> str:
     if not src or provider in ("", "file"):
         return ""
 
-    video_id = ""
-    for pattern in _ID_PATTERNS.get(provider, []):
-        matched = pattern.search(src)
-        if matched:
-            video_id = matched.group(1)
-            break
-    if not video_id and re.fullmatch(r"[\w-]{6,}", src):
-        video_id = src
-    if not video_id:
+    video = video_id(provider, src)
+    if not video:
         return src          # 认不出来就原样交给 iframe
 
     if provider == "youtube":
-        return f"https://www.youtube.com/embed/{video_id}?rel=0"
+        return f"https://www.youtube.com/embed/{video}?rel=0"
     if provider == "bilibili":
-        return (f"https://player.bilibili.com/player.html?bvid={video_id}"
+        if video.lower().startswith("av"):
+            return (f"https://player.bilibili.com/player.html?aid={video[2:]}"
+                    "&autoplay=0&danmaku=0&high_quality=1")
+        return (f"https://player.bilibili.com/player.html?bvid={video}"
                 "&autoplay=0&danmaku=0&high_quality=1")
     if provider == "vimeo":
-        return f"https://player.vimeo.com/video/{video_id}"
+        return f"https://player.vimeo.com/video/{video}"
     return src
 
 
@@ -768,5 +789,5 @@ __all__ = [
     "human_size", "is_embed", "is_remote", "matches", "media_card", "media_detail",
     "media_items", "normalize_media", "paginate", "parse_duration", "parse_int",
     "provider_label", "query_media", "search_terms", "site_payload", "site_stats",
-    "sort_media", "store", "text",
+    "sort_media", "store", "text", "video_id",
 ]

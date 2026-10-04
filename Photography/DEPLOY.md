@@ -406,6 +406,11 @@ journalctl -u photography-admin -f
 sudo systemctl restart photography-admin
 ```
 
+> **不想让服务出网**（外链封面自动抓取是唯一的出网点）：在单元文件里加
+> `Environment=COT_NO_NET_FETCH=1`（或给 `ExecStart` 加 `--no-net-fetch`），
+> `systemctl daemon-reload && sudo systemctl restart photography-admin`。
+> 之后抓取接口直接回 400，后台也不再显示「自动获取封面」按钮 —— 封面请手动上传。
+
 > **从旧版本升级过来的必做一步**：老单元文件里没有内存约束。升级代码后重新生成一次单元文件
 > 并重载，否则这次的内存加固只在代码层生效、没有兜底：
 >
@@ -585,6 +590,8 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 更新提示「有未受信任的作者」 | 提交邮箱不在白名单里：`git log -1 --format=%ae` 确认是自己，然后 `./run.sh update --accept-authors` |
 | 更新提示「正在上传，这次先不动」 | 正常行为（推迟到下一轮；`./run.sh update-check status` 可看）。急的话 `./run.sh update --force` |
 | 更新后服务起不来 | 已自动回滚并重新拉起，看 `./run.sh logs 80` 定位这次发布的问题；回滚记录在 `.run/autoupdate.state` |
+| 外链视频存不进去，说「自动抓取失败」 | 服务端出网被挡：`--no-net-fetch` 关掉了、机器连不上服务商（YouTube 在部分机房不可达）、或该视频没有缩略图。手动上传一张封面即可；确认不需要自动抓取就用 `--no-net-fetch` 跑 |
+| 「自动获取封面」按钮不显示 | `/api/schema` 里 `netFetch=false`，说明启动时带了 `--no-net-fetch`（或设了 `COT_NO_NET_FETCH=1`） |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。
 

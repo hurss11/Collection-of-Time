@@ -50,7 +50,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from adminlib import auth, media, multipart, query, ranges, schema, store, videometa    # noqa: E402
+from adminlib import auth, media, multipart, query, ranges, schema, store, thumbs, videometa    # noqa: E402
 from adminlib.exifread import ExifError, read_exif, to_entry_exif  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -139,6 +139,10 @@ class Activity:
 
 
 ACTIVITY = Activity(ACTIVITY_PATH)
+
+# 允许服务端出网抓取外链视频封面（只限 adminlib/thumbs.py 里那份域名白名单）。
+# 默认开，`--no-net-fetch` 或 COT_NO_NET_FETCH=1 可关掉（纯离线部署）。
+NET_FETCH = os.environ.get("COT_NO_NET_FETCH", "").strip().lower() not in ("1", "true", "yes")
 
 
 def ensure_default_album(*, when_unused: bool = False) -> tuple[bool, list[str]]:
@@ -855,6 +859,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.api_asset_poster()
             return
 
+        if head == "assets" and method == "POST" and len(segments) >= 2 and segments[1] == "thumb":
+            self.api_asset_thumb()
+            return
+
         if head == "item" and method == "GET":
             self.api_item(segments[1:])
             return
@@ -1211,6 +1219,7 @@ class Handler(SimpleHTTPRequestHandler):
             "sorts": query.ADMIN_SORTS,
             "columns": {name: query.admin_columns(name) for name in schema.collections()},
             "upload": self.upload_options_payload(),
+            "netFetch": NET_FETCH,                                     # 前端据此显示/隐藏「自动获取封面」
         })
 
     def upload_options_payload(self) -> dict:
@@ -1305,10 +1314,48 @@ class Handler(SimpleHTTPRequestHandler):
             "item": raw,
         })
 
+    def _autofill_external_cover(self, item: dict) -> tuple[str, str]:
+        """外链视频没填封面就试着自动抓一张。返回 (相对路径, 失败原因)；成功时原因是空串。"""
+        if not NET_FETCH:
+            return "", "服务端已关闭出网抓取，请手动上传封面"
+        provider = query.text(item.get("provider")) or "file"
+        if provider == "file":
+            return "", ""
+        src = query.text(item.get("src"))
+        if not src:
+            return "", ""
+        try:
+            cover = thumbs.fetch_cover(provider, src, budget=thumbs.AUTOFILL_TIMEOUT)
+        except thumbs.ThumbError as exc:
+            return "", str(exc)
+
+        stem = f"up-{cover['provider']}-{cover['videoId']}"
+        target = store.unique_path(POSTER_DIR, f"{store.safe_filename(stem, fallback='cover')}{cover['suffix']}")
+        try:
+            target.write_bytes(cover["data"])
+        except OSError as exc:
+            return "", f"封面保存失败：{exc}"
+        remember("自动抓取封面", f"{cover['label']} / {cover['videoId']}")
+        return store.ensure_relative(ROOT, target), ""
+
     def _save_item(self, collection: str, payload: dict) -> tuple[dict, list[str]]:
         """新增与编辑共用一条路径：归一化 → 校验 → 合并已有条目 → 落盘。"""
         item = schema.normalize_submission(collection, payload)
+
+        # 外链视频没给封面时先自动抓一张（表单里留空即可），抓不到再让校验去报错
+        cover_note = ""
+        if collection == "videos" and not query.text(item.get("poster")):
+            poster, cover_note = self._autofill_external_cover(item)
+            if poster:
+                item["poster"] = poster
+                cover_note = ""
+
         errors = schema.validate(collection, item)
+        if errors and cover_note:
+            # 把「为什么没抓到」补进封面那条错误里，否则用户只看到「必须填写封面图」
+            for error in errors:
+                if error.get("field") == "poster":
+                    error["message"] = f"{error['message']}（自动抓取失败：{cover_note}）"
         if errors:
             raise ApiError("提交内容有误，请检查标红的字段", HTTPStatus.BAD_REQUEST, errors)
 
@@ -1774,6 +1821,43 @@ class Handler(SimpleHTTPRequestHandler):
         relative = store.ensure_relative(ROOT, target)
         remember("上传封面素材", relative)
         self.send_json({"ok": True, "path": relative, "url": f"/{relative}", "bytes": target.stat().st_size})
+
+    def api_asset_thumb(self) -> None:
+        """校验外链并自动抓取封面（`POST /api/assets/thumb`，JSON `{provider, src}`）。
+
+        沿用「先拿路径、随表单保存」的用法（同 api_asset_poster）。识别与出网的边界都在
+        `adminlib/thumbs.py` 里：用户填的链接**不会被请求**，只会按 provider 拼出官方接口或
+        固定缩略图地址，并且这些地址必须落在域名白名单上。
+        """
+        if not NET_FETCH:
+            raise ApiError("服务端已关闭出网抓取（启动参数 --no-net-fetch），请手动上传封面")
+        payload = self.read_json()
+        provider = query.text(payload.get("provider"))
+        src = query.text(payload.get("src"))
+
+        try:
+            cover = thumbs.fetch_cover(provider, src)
+        except thumbs.ThumbError as exc:
+            raise ApiError(str(exc)) from exc
+        stem = f"up-{cover['provider']}-{cover['videoId']}"
+        target = store.unique_path(POSTER_DIR, f"{store.safe_filename(stem, fallback='cover')}{cover['suffix']}")
+        try:
+            target.write_bytes(cover["data"])
+        except OSError as exc:
+            raise ApiError(f"封面保存失败：{exc}") from exc
+
+        relative = store.ensure_relative(ROOT, target)
+        remember("自动抓取封面", f"{cover['label']} / {cover['videoId']} → {relative}")
+        self.send_json({
+            "ok": True,
+            "path": relative,
+            "url": f"/{relative}",
+            "bytes": target.stat().st_size,
+            "provider": cover["provider"],
+            "label": cover["label"],
+            "videoId": cover["videoId"],
+            "embedUrl": cover["embedUrl"],
+        })
 
     # ---------- 备份 ----------
 
@@ -2321,6 +2405,8 @@ def main() -> int:
                         metavar="ORIGIN",
                         help="允许跨域的前端地址，可重复；例如 https://admin.example.com")
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument("--no-net-fetch", action="store_true",
+                        help="禁止服务端出网抓取外链视频封面（离线部署用；仅白名单域名会被访问）")
     parser.add_argument("--print-systemd", action="store_true",
                         help="打印 systemd 单元文件后退出")
     parser.add_argument("--memory-max", default="512M", metavar="SIZE",
@@ -2348,6 +2434,10 @@ def main() -> int:
                         metavar="USERNAME", help="重置管理员密码后退出")
 
     args = parser.parse_args()
+
+    global NET_FETCH
+    if args.no_net_fetch:
+        NET_FETCH = False
 
     if args.create_user is not None:
         return command_create_user(args.create_user)
@@ -2443,6 +2533,10 @@ def main() -> int:
     print(f"  FFmpeg   : {TOOLS.source_label}" + (f"（{TOOLS.version[:60]}）" if TOOLS.version else ""))
     if not TOOLS.available:
         print("             → 可执行 ./run.sh install-ffmpeg 下载静态构建到 bin/")
+    if NET_FETCH:
+        print("  外链封面 : 允许出网抓取（仅限 thumbs.py 里的白名单域名；--no-net-fetch 可关闭）")
+    else:
+        print("  外链封面 : 已关闭出网抓取（--no-net-fetch），外链视频请手动上传封面")
     if args.allow_origin:
         print(f"  跨域白名单 : {', '.join(args.allow_origin)}")
     if external:

@@ -110,7 +110,7 @@ export const modal = {
    表单：schema 驱动的「扁平」读写
    ============================================================ */
 
-function fieldMarkup(field, value, albums) {
+function fieldMarkup(field, value, albums, options) {
   const common = `data-key="${escapeHtml(field.key)}" class="input${field.mono ? ' input--mono' : ''}"`;
   const hint = field.hint ? `<span class="muted">${escapeHtml(field.hint)}</span>` : '';
   const label = `<span>${escapeHtml(field.label)}${field.required ? ' <i class="req">*</i>' : ''}</span>`;
@@ -148,9 +148,12 @@ function fieldMarkup(field, value, albums) {
   // 用 div 而不是 label 包起来：里面是按钮 + 隐藏的 file 控件，
   // 塞进 label 里点按钮会连带激活 label 指向的输入框。
   if (field.upload) {
+    const canFetch = options && options.netFetch;
     return `<div class="field" data-upload-field="${escapeHtml(field.key)}">${label}
       <div class="row field__pair">${input}
         <button class="btn btn--sm" type="button" data-upload="${escapeHtml(field.upload)}">上传图片…</button>
+        ${canFetch ? `<button class="btn btn--sm" type="button" data-fetch-thumb="${escapeHtml(field.upload)}"
+          title="按上面的来源与链接去服务商那里取缩略图">自动获取封面</button>` : ''}
       </div>
       <input type="file" accept="image/*" data-upload-input="${escapeHtml(field.upload)}" hidden />
       ${hint}</div>`;
@@ -164,8 +167,9 @@ function fieldMarkup(field, value, albums) {
  * @param {object[]} fields 服务端 schema.fields
  * @param {object} values 已摊平的表单值（GET /api/item 的 values）
  * @param {object[]} albums 相册选项，[{value,label}]
+ * @param {object} [options] 服务端能力开关，目前用 {netFetch} 决定要不要显示「自动获取封面」
  */
-export function renderForm(fields, values = {}, albums = []) {
+export function renderForm(fields, values = {}, albums = [], options = {}) {
   // tags 在 values 里是数组，控件里用逗号串表示
   const valueOf = (field) => {
     const raw = values[field.key];
@@ -177,11 +181,11 @@ export function renderForm(fields, values = {}, albums = []) {
   const groups = [...new Set(fields.filter((f) => f.group).map((f) => f.group))];
 
   return [
-    `<div class="field-grid">${plain.map((f) => fieldMarkup(f, valueOf(f), albums)).join('')}</div>`,
+    `<div class="field-grid">${plain.map((f) => fieldMarkup(f, valueOf(f), albums, options)).join('')}</div>`,
     ...groups.map((group) => `<fieldset><legend>${escapeHtml(group)}</legend>
       <div class="field-grid">${fields
         .filter((f) => f.group === group)
-        .map((f) => fieldMarkup(f, valueOf(f), albums))
+        .map((f) => fieldMarkup(f, valueOf(f), albums, options))
         .join('')}</div></fieldset>`),
   ].join('');
 }

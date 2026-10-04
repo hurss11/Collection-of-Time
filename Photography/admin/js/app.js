@@ -222,23 +222,31 @@ async function openEditor(collection, id, isNew) {
   modal.open({
     title: `${isNew ? '新增' : '编辑'}${noun}${isNew ? '' : ` · ${id}`}`,
     hint: isNew ? '保存后由服务端分配 id 并写入数据文件' : '保存会立即写回数据文件',
-    bodyHtml: renderForm(fields, values, albums),
+    bodyHtml: renderForm(fields, values, albums, { netFetch: state.schema.netFetch !== false }),
     onMount: (root) => wireCoverUpload(root),
     onSave: saveEditor,
   });
 }
 
 /**
- * 给带 `field.upload` 声明的字段接上「上传图片…」按钮（目前是视频的封面图）。
+ * 给带 `field.upload` 声明的字段接上「上传图片…」与「自动获取封面」两个按钮
+ * （目前是视频的封面图）。
  *
  * 新增视频时条目还没有 id，走不了 `POST /api/videos/{id}/poster`，
- * 所以先上传拿到路径（`POST /api/assets/poster`）、回填文本框，再随表单一起保存。
+ * 所以两条路都是「先拿到路径 → 回填文本框 → 随表单一起保存」：
+ *   - 上传图片  → `POST /api/assets/poster`；
+ *   - 自动获取  → `POST /api/assets/thumb`（服务端按 provider + 链接去服务商取缩略图）。
  */
 function wireCoverUpload(root) {
   const button = $('[data-upload="poster"]', root);
   const picker = $('[data-upload-input="poster"]', root);
   const field = $('[data-key="poster"]', root);
   if (!button || !picker || !field) return;
+
+  const fill = (path) => {
+    field.value = path || '';
+    field.classList.remove('is-invalid');
+  };
 
   button.addEventListener('click', () => picker.click());
   picker.addEventListener('change', async (event) => {
@@ -253,14 +261,39 @@ function wireCoverUpload(root) {
       const form = new FormData();
       form.append('file', file, file.name);
       const payload = await api.uploadCover(form);
-      field.value = payload.path || '';
-      field.classList.remove('is-invalid');
+      fill(payload.path);
       toast(`封面已上传，保存后生效：${payload.path}`, 'ok', 5000);
     } catch (error) {
       toast(error.message, 'err', 6000);
     } finally {
       button.disabled = false;
       button.textContent = label;
+    }
+  });
+
+  const fetchButton = $('[data-fetch-thumb="poster"]', root);
+  if (!fetchButton) return;
+  fetchButton.addEventListener('click', async () => {
+    const provider = $('[data-key="provider"]', root)?.value || '';
+    const src = ($('[data-key="src"]', root)?.value || '').trim();
+    if (!src) {
+      toast('请先填「文件路径 / 视频链接 / BV 号」', 'err', 5000);
+      $('[data-key="src"]', root)?.focus();
+      return;
+    }
+
+    const label = fetchButton.textContent;
+    fetchButton.disabled = true;
+    fetchButton.textContent = '获取中…';
+    try {
+      const payload = await api.fetchThumb(provider, src);
+      fill(payload.path);
+      toast(`已识别 ${payload.label} · ${payload.videoId}，封面：${payload.path}`, 'ok', 6000);
+    } catch (error) {
+      toast(error.message, 'err', 8000);
+    } finally {
+      fetchButton.disabled = false;
+      fetchButton.textContent = label;
     }
   });
 }

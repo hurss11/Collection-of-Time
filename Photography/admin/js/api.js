@@ -218,6 +218,8 @@ export const api = {
   setPoster: (id, form) =>
     request(`/api/videos/${encodeURIComponent(id)}/poster`, { method: 'POST', form }),
   uploadCover: (form) => request('/api/assets/poster', { method: 'POST', form }),
+  fetchThumb: (provider, src) =>
+    request('/api/assets/thumb', { method: 'POST', json: { provider, src } }),
   removeItem: (collection, id, withFile = false) =>
     request(`/api/items/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${withFile ? '/file' : ''}`, {
       method: 'DELETE',
