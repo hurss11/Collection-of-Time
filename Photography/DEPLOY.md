@@ -621,6 +621,60 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 
 媒体文件会越来越大，之后建议用 rsync 增量同步到另一台机器或对象存储。
 
+### 9.1 整仓快照（回滚锚点）：`tools/cot-backup.sh`
+
+上面那条是**内容备份**；出问题时想把整个部署**退回去**（代码 + 内容 + 配置 + 「本地改过什么」的记录
+一起），用随代码发布的这一条 —— `tools/` 属于代码路径，`./run.sh update` 之后它就在部署目录里：
+
+```bash
+cd <部署目录>                                              # 例如 /root/Collection-of-Time/Photography
+sudo bash tools/cot-backup.sh                             # 做一份快照，只保留最近 2 份
+sudo COT_BACKUP_KEEP=5 bash tools/cot-backup.sh           # 改保留份数
+sudo COT_BACKUP_ROOT=/mnt/backup bash tools/cot-backup.sh # 换存放位置
+```
+
+它做四件事：
+
+| 步骤 | 说明 |
+| --- | --- |
+| 前置检查 | 剩余空间不足 2 GB 直接拒绝（一份接近 900 MB）；发现是浅克隆会提醒（见 9.2） |
+| 整仓 tar | `<快照目录>/Collection-of-Time-full.tar`：`.git` 完整历史 + 上传内容；排除 `__pycache__`、`*.pyc`、`.run/*.log` 这些**可再生**的东西，但保留 `.run/autoupdate.state`（回滚历史） |
+| 记录与配置 | `RECORD-HEAD.txt`（回滚锚点）、`RECORD-status.txt`、`RECORD-local-changes.patch`，以及单独一份 `admin.config.json`（权限 600） |
+| 保留策略 | 只保留最近 N 份（默认 2），只删 `$COT_BACKUP_ROOT/cot-full.*`；中途失败会清掉本次的半成品，不会把已有快照误当半成品删掉 |
+
+部署目录**不一定是仓库根**（`<仓库根>/Photography` 也是常见布局）：脚本自己问 git 要仓库根，
+不用告诉它路径；不是 git 检出（迁移包解压部署）时退回到上一级目录，快照里就没有版本锚点。
+
+默认放在 `/root/cot-backup/`（`chmod 700`，因为里面有 `admin.config.json`），最新一份记在
+`LAST-FULL-BACKUP.txt`，回滚时先看它：
+
+```bash
+cat /root/cot-backup/LAST-FULL-BACKUP.txt
+```
+
+体积参考 —— **所以别去压缩它**：整仓约 865 MB，其中 4 个上传视频占 ~708 MB、`.git`（含完整历史）
+只有 ~1 MB。已经是 H.264 / JPEG，gzip 收益 < 5%；要省空间就减 `COT_BACKUP_KEEP`，或把媒体
+另存到对象存储。
+
+### 9.2 浅克隆会让「更新失败自动回滚」失效
+
+更新流程的兜底是「新版本起不来就退回上一个版本」，而**浅克隆里历史被裁剪**，
+`rollback` 找不到目标版本的树，只会回一句「回滚目标 … 不在本地仓库里（历史被裁剪过？）」。
+先确认：
+
+```bash
+git -C <仓库根> rev-parse --is-shallow-repository     # true = 浅克隆（git 的 --depth/--shallow 拉的）
+```
+
+补成完整克隆（只补对象与引用，不动工作区、不动 `data/` 与上传内容，代价约 1 MB）：
+
+```bash
+git -C <仓库根> fetch --unshallow origin
+```
+
+顺带说明它为什么也治「浅克隆遇到 force push 就坏」：浅克隆只认识浅边界那一个提交，
+**边界提交被强推掉以后 `git fetch` 就没有立足点了**，更新会直接失败。
+
 ---
 
 ## 10. 排查

@@ -1487,6 +1487,7 @@ package() {
            adminlib/store.py adminlib/auth.py adminlib/media.py adminlib/exifread.py \
            adminlib/query.py adminlib/schema.py \
            tools/fetch_ffmpeg.py tools/make_posters.py tools/check_https.py \
+           tools/cot-backup.sh \
            data/albums.json data/photos.json data/videos.json; do
     [ -e "$f" ] || missing="$missing $f"
   done
