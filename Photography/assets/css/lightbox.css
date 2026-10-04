@@ -153,7 +153,7 @@
 }
 
 .exif__item {
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-elev) 70%, transparent);
   padding: 7px 11px;
@@ -162,6 +162,7 @@
 
 .exif__key {
   display: block;
+  font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -185,7 +186,7 @@
 .lightbox__status {
   margin: 0;
   font-size: 12.5px;
-  color: #e08080;
+  color: var(--danger);
   overflow-wrap: anywhere;
 }
 
@@ -195,7 +196,7 @@
 }
 
 .ghost-btn {
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: transparent;
   color: var(--text-soft);
@@ -214,7 +215,7 @@
   z-index: 2;
   display: grid;
   place-items: center;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   background: var(--bg-elev);
   color: var(--text);
   cursor: pointer;
@@ -265,6 +266,7 @@
 .lightbox__counter {
   margin: 0;
   text-align: center;
+  font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.16em;
   color: var(--text-mute);
@@ -277,7 +279,7 @@
   align-items: center;
   gap: 2px;
   padding: 3px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--bg-elev);
 }
@@ -324,7 +326,7 @@
   gap: 8px;
   width: min(100%, 720px);
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--bg-elev);
   box-shadow: var(--shadow);

@@ -1,19 +1,32 @@
 /**
- * gallery.js —— 作品网格 / 相册总览 / 筛选 chips 的渲染
+ * gallery.js —— 作品流 / 系列专题块 / 筛选 chips 的渲染
  *
  * 只把 API 已经算好的字段拼成 HTML，并同步选中态；
  * 不含筛选、排序、计数、格式化等任何业务逻辑。
+ *
+ * 作品流的行结构由 justify.js 决定，这里只保证每个 .shot 带上：
+ *   data-ar  —— 宽高比（服务端按原始尺寸算好，用于分行）
+ *   data-id / [data-open] —— 灯箱与封面补丁的挂点
  */
 
 import { escapeHtml } from './data.js';
 
 const VIDEO = 'video';
+const FALLBACK_AR = 1.5;
 
-/* ---------- 作品网格 ---------- */
+/* ---------- 作品流 ---------- */
+
+/** 宽高比：优先用服务端的原始像素数，取不到就 3:2 */
+function aspectOf(item) {
+  const width = Number(item.width) || 0;
+  const height = Number(item.height) || 0;
+  if (width > 0 && height > 0) return width / height;
+  return FALLBACK_AR;
+}
 
 /** 媒体区：服务端给的封面 / 缩略图地址；为空时用占位块。 */
 function mediaMarkup(item) {
-  if (!item.imageUrl) return '<span class="card__placeholder" aria-hidden="true"></span>';
+  if (!item.imageUrl) return '<span class="shot__placeholder" aria-hidden="true"></span>';
   return `<img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.title)}"
                loading="lazy" decoding="async" data-lazy />`;
 }
@@ -25,64 +38,61 @@ function flagsMarkup(item) {
   if (item.kind === VIDEO && item.srcMissing) flags.push('文件缺失');
   if (item.kind === VIDEO && item.linkStatus === 'gone') flags.push('链接已失效');
   if (!flags.length) return '';
-  return `<span class="card__flags">${flags
-    .map((text) => `<span class="card__flag">${escapeHtml(text)}</span>`)
+  return `<span class="shot__flags">${flags
+    .map((text) => `<span class="shot__flag">${escapeHtml(text)}</span>`)
     .join('')}</span>`;
 }
 
-function tagsMarkup(tags) {
-  if (!tags || !tags.length) return '';
-  return `<span class="card__tags">${tags
-    .slice(0, 4)
-    .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
-    .join('')}</span>`;
+/** 图注第二行：地点 + 拍摄参数，等宽小字 */
+function exifLine(item) {
+  return [item.location, item.exifSummary].filter(Boolean).join(' · ');
 }
 
-function cardMarkup(item) {
+/**
+ * 一件作品：一个盒子（比例 = 照片比例，所以不裁切）+ 两行图注。
+ * @param {object} item 服务端条目
+ * @param {number} number 序号，从 1 开始，跨分页连续
+ */
+function shotMarkup(item, number) {
   const isVideo = item.kind === VIDEO;
-  const subtitle = item.subtitle
-    ? `<span class="card__meta">${escapeHtml(item.subtitle)}</span>`
-    : '';
-  const summary = item.exifSummary
-    ? `<span class="card__meta">${escapeHtml(item.exifSummary)}</span>`
-    : '';
-  const date = item.dateText
-    ? `<span class="card__meta card__meta--date">${escapeHtml(item.dateText)}</span>`
-    : '';
+  // 外链视频站内不播放：整块就是一个指向原站观看页的链接，点了新标签打开。
+  const external = isVideo && item.watchUrl;
 
-  // 外链视频站内不播放：整张卡片就是一个指向原站观看页的链接，点了新标签打开。
-  // index.html 的 CSP 里 frame-src 还留着，但页面已经不再嵌任何 iframe。
-  const link = isVideo && item.watchUrl
-    ? `<a class="card__trigger" href="${escapeHtml(item.watchUrl)}"
+  const trigger = external
+    ? `<a class="shot__trigger" href="${escapeHtml(item.watchUrl)}"
           target="_blank" rel="noopener noreferrer"
           aria-label="在${escapeHtml(item.providerLabel || '原站')}打开《${escapeHtml(item.title)}》">`
-    : `<button class="card__trigger" type="button" data-open="${escapeHtml(item.id)}"
+    : `<button class="shot__trigger" type="button" data-open="${escapeHtml(item.id)}"
           aria-label="${isVideo ? '播放' : '查看'}《${escapeHtml(item.title)}》">`;
-  const closer = isVideo && item.watchUrl ? '</a>' : '</button>';
-  const mediaInside = isVideo && item.watchUrl
-    ? '<span class="play-badge play-badge--out" aria-hidden="true"></span>'
-    : (isVideo ? '<span class="play-badge" aria-hidden="true"></span>' : '');
+  const closer = external ? '</a>' : '</button>';
+
+  const play = isVideo
+    ? `<span class="shot__play${external ? ' shot__play--out' : ''}" aria-hidden="true"></span>`
+    : '';
+  const album = item.albumName
+    ? `<span class="shot__album">${escapeHtml(item.albumName)}</span>`
+    : '';
+  const duration = isVideo && item.durationText
+    ? `<span class="shot__duration">${escapeHtml(item.durationText)}</span>`
+    : '';
+  const exif = exifLine(item);
 
   return `
-    <article class="card${isVideo ? ' card--video' : ''}" role="listitem" data-id="${escapeHtml(item.id)}">
-      ${link}
-        <div class="card__media">
+    <figure class="shot" role="listitem" data-id="${escapeHtml(item.id)}" data-ar="${aspectOf(item).toFixed(4)}">
+      ${trigger}
+        <span class="shot__frame">
           ${mediaMarkup(item)}
-          ${item.albumName ? `<span class="card__badge">${escapeHtml(item.albumName)}</span>` : ''}
-          ${mediaInside}
-          ${isVideo && item.durationText ? `<span class="card__duration">${escapeHtml(item.durationText)}</span>` : ''}
+          ${album}
+          ${play}
+          ${duration}
           ${flagsMarkup(item)}
-        </div>
-        <div class="card__body">
-          <span class="card__title">${escapeHtml(item.title)}</span>
-          ${subtitle}
-          ${summary}
-          ${date}
-          ${tagsMarkup(item.tags)}
-          ${isVideo && item.watchUrl ? `<span class="card__meta card__meta--out">${escapeHtml(item.providerLabel || '原站')}打开 ↗</span>` : ''}
-        </div>
+        </span>
       ${closer}
-    </article>`;
+      <figcaption class="shot__cap">
+        <span class="shot__title"><span class="shot__no">${String(number).padStart(2, '0')}</span>${escapeHtml(item.title)}</span>
+        ${exif ? `<span class="shot__exif">${escapeHtml(exif)}</span>` : ''}
+      </figcaption>
+    </figure>`;
 }
 
 /** 图片加载完成后淡入，避免「白块」闪烁 */
@@ -98,14 +108,18 @@ function attachLazyFade(root) {
 }
 
 /**
- * 渲染作品网格（事件委托由 app.js 统一绑定）。
+ * 渲染作品流（事件委托由 app.js 统一绑定）。
+ * 序号从容器里已有的作品数接着往下排，所以「加载更多」不会从 01 重来。
  * @param {HTMLElement} container
  * @param {object[]} items 服务端返回的作品条目
  * @param {{append?: boolean}} [options] append=true 时追加（分页「加载更多」）
  */
 export function renderCards(container, items, options) {
-  const html = items.map(cardMarkup).join('');
-  if (options && options.append) container.insertAdjacentHTML('beforeend', html);
+  const append = Boolean(options && options.append);
+  const start = append ? container.querySelectorAll('.shot').length : 0;
+  const html = items.map((item, index) => shotMarkup(item, start + index + 1)).join('');
+
+  if (append) container.insertAdjacentHTML('beforeend', html);
   else container.innerHTML = html;
   attachLazyFade(container);
 }
@@ -117,56 +131,61 @@ export function resolveCardId(event) {
 }
 
 /**
- * 补上封面后同步卡片：把占位块换成真图。
+ * 补上封面后同步作品：把占位块换成真图。
  *
  * 用在「本地视频第一次播放时抓的那一帧」（见 cover.js）：封面是灯箱里补的，
- * 网格上的占位块得跟着换掉，否则要刷新页面才看得到。
+ * 作品流上的占位块得跟着换掉，否则要刷新页面才看得到。
  * @returns {boolean} 是否真的换掉了
  */
 export function patchCardCover(container, item, url) {
   if (!container || !item || !url) return false;
 
-  const card = [...container.querySelectorAll('.card[data-id]')]
+  const shot = [...container.querySelectorAll('.shot[data-id]')]
     .find((node) => node.dataset.id === String(item.id));
-  const placeholder = card?.querySelector('.card__media .card__placeholder');
+  const placeholder = shot?.querySelector('.shot__frame .shot__placeholder');
   if (!placeholder) return false;
 
   placeholder.insertAdjacentHTML('afterend', mediaMarkup({ imageUrl: url, title: item.title }));
   placeholder.remove();
-  attachLazyFade(placeholder.parentElement || card);
+  attachLazyFade(placeholder.parentElement || shot);
   return true;
 }
 
-/** 加载中的骨架屏 */
+/** 加载中的骨架屏：走同一套行布局，所以不会先跳一下再变成作品 */
 export function renderSkeleton(container, count = 6) {
   const template = document.getElementById('skeleton-template');
   if (!template) return;
   container.innerHTML = Array.from({ length: count }, () => template.innerHTML).join('');
 }
 
-/* ---------- 相册总览 ---------- */
+/* ---------- 系列专题块 ---------- */
 
-function albumMarkup(album) {
+function stripMarkup(album, index) {
   const cover = album.cover && !album.coverMissing
     ? `<img src="${escapeHtml(album.cover)}" alt="" loading="lazy" decoding="async" />`
-    : '<span class="album-card__placeholder" aria-hidden="true"></span>';
+    : '<span class="strip__placeholder" aria-hidden="true"></span>';
+  const description = album.description
+    ? `<span class="strip__desc">${escapeHtml(album.description)}</span>`
+    : '';
+
   return `
-    <button class="album-card" type="button" data-album="${escapeHtml(album.id)}"
+    <button class="strip" type="button" data-album="${escapeHtml(album.id)}"
             aria-pressed="false" title="${escapeHtml(album.description)}">
-      <span class="album-card__media">${cover}</span>
-      <span class="album-card__body">
-        <span class="album-card__name">${escapeHtml(album.name)}</span>
-        <span class="album-card__meta">${album.count} 项作品</span>
+      <span class="strip__media">${cover}</span>
+      <span class="strip__body">
+        <span class="strip__name">${escapeHtml(album.name)}</span>
+        ${description}
+        <span class="strip__meta">系列 ${String(index + 1).padStart(2, '0')} · ${album.count} 项作品</span>
       </span>
     </button>`;
 }
 
-/** @param {object[]} albums 服务端 albums 卡片（id / name / cover / coverMissing / count） */
+/** @param {object[]} albums 服务端 albums 卡片（id / name / cover / coverMissing / count / description） */
 export function renderAlbums(container, albums) {
-  container.innerHTML = albums.map(albumMarkup).join('');
+  container.innerHTML = albums.map(stripMarkup).join('');
 }
 
-/** 同步相册卡片的选中态 */
+/** 同步系列专题块的选中态 */
 export function syncAlbums(container, albumId) {
   container.querySelectorAll('[data-album]').forEach((node) => {
     node.setAttribute('aria-pressed', String(node.dataset.album === albumId));
@@ -208,5 +227,5 @@ export function syncChips(containers, active) {
 
 /** 结果计数文案：数字全部来自服务端 meta */
 export function renderCountText(shown, total) {
-  return shown >= total ? `共 ${total} 项作品` : `已显示 ${shown} / ${total} 项作品`;
+  return shown >= total ? `共 ${total} 项` : `已显示 ${shown} / ${total} 项`;
 }

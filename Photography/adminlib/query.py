@@ -517,6 +517,28 @@ def exif_summary(item: dict, kind: str) -> str:
     return " · ".join(text(exif[key]) for key in EXIF_SUMMARY_KEYS if text(exif.get(key)))
 
 
+_DIMENSIONS_RE = re.compile(r"(\d+)\s*[×xX*]\s*(\d+)")
+
+
+def media_size(item: dict, kind: str) -> tuple[int, int]:
+    """原始像素尺寸：照片取 EXIF 的「7008 \u00d7 4672」，视频取分辨率。
+
+    取不到返回 (0, 0)，前端按 3:2 兜底 —— 等高拼接只关心比例，不需要真实像素。
+    有了它就不必等图片解码完才知道宽高比，行高不会跳动。
+    """
+    exif = item.get("exif") if isinstance(item.get("exif"), dict) else {}
+    candidates = (item.get("resolution"), exif.get("dimensions"))
+    if kind != "video":
+        candidates = (exif.get("dimensions"), item.get("resolution"))
+    for raw_value in candidates:
+        match = _DIMENSIONS_RE.search(text(raw_value))
+        if match:
+            width, height = int(match.group(1)), int(match.group(2))
+            if width > 0 and height > 0:
+                return (width, height)
+    return (0, 0)
+
+
 # ============================================================
 # 媒体条目（照片 + 视频统一结构）
 # ============================================================
@@ -673,6 +695,7 @@ def media_card(item: dict, albums: dict[str, dict], root: Path) -> dict:
     # 照片用缩略图（没有 thumb 时 normalize 已回落到原图）。
     image_path = item["poster"] if is_video else item["thumb"]
 
+    width, height = media_size(item, item["kind"])
     album_name = _album_name(albums, item["album"])
     location = item["location"]
     subtitle = " · ".join(part for part in (album_name if item["album"] else "", location) if part)
@@ -706,6 +729,8 @@ def media_card(item: dict, albums: dict[str, dict], root: Path) -> dict:
         "linkCheckedAt": link_status.get("at", ""),
         "durationText": duration_text(item["duration"]) if is_video else "",
         "resolution": item["resolution"] if is_video else "",
+        "width": width,
+        "height": height,
         "exif": exif_rows(item, item["kind"]),
         "exifSummary": exif_summary(item, item["kind"]),
         "isEmbed": embed,

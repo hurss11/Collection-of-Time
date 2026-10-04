@@ -1,10 +1,10 @@
 /**
  * app.js —— 应用入口
  *
- * 数据流：fetchSite() → 渲染统计 / 相册 / chips / 排序项
- *         fetchGallery(筛选 + 分页) → 渲染作品网格 → 灯箱
+ * 数据流：fetchSite() → 渲染统计 / 系列专题块 / chips / 排序项
+ *         fetchGallery(筛选 + 分页) → 渲染作品流（等高拼接）→ 灯箱
  *
- * 筛选、排序、分页、统计、缺失标记、EXIF 全部由服务端算好，
+ * 筛选、排序、分页、统计、缺失标记、EXIF、宽高比全部由服务端算好，
  * 前端只做三件事：取值 → 拼 HTML → 绑事件。
  */
 
@@ -21,6 +21,7 @@ import {
   patchCardCover,
 } from './gallery.js';
 import { createLightbox } from './lightbox.js';
+import { layoutRows, watchLayout, watchRatios } from './justify.js';
 
 const PAGE_SIZE = 24;
 
@@ -35,11 +36,20 @@ const el = {
   searchClear: document.getElementById('search-clear'),
   sort: document.getElementById('sort-select'),
   reset: document.getElementById('filter-reset'),
+  filtersToggle: document.getElementById('filters-toggle'),
+  filtersPanel: document.getElementById('filters-panel'),
+  filtersCount: document.getElementById('filters-count'),
   loadMore: document.getElementById('load-more'),
   count: document.getElementById('result-count'),
   empty: document.getElementById('empty-state'),
   themeToggle: document.getElementById('theme-toggle'),
+  themeLabel: document.getElementById('theme-label'),
   year: document.getElementById('year'),
+  hero: {
+    figure: document.getElementById('hero-figure'),
+    image: document.getElementById('hero-image'),
+    caption: document.getElementById('hero-caption'),
+  },
   stats: {
     works: document.querySelector('[data-stat="works"]'),
     albums: document.querySelector('[data-stat="albums"]'),
@@ -56,11 +66,12 @@ const state = {
   active: null,
   page: 1,
   token: 0,
+  heroReady: false,
 };
 
 const lightbox = createLightbox(document.getElementById('lightbox'), {
   // 灯箱里第一次播放「没有封面的本地视频」时抓到的那一帧已经存进后端了，
-  // 顺手把网格上的占位块换成它，免得要刷新页面才看得到（见 cover.js）。
+  // 顺手把作品流上的占位块换成它，免得要刷新页面才看得到（见 cover.js）。
   onCoverCaptured: (item, url) => {
     patchCardCover(el.gallery, item, url);
   },
@@ -73,6 +84,17 @@ function apiHasActive(active) {
   return Boolean(active.q) || active.type !== 'all' || Boolean(active.album) || tags.length > 0;
 }
 
+/** 生效中的筛选条件条数：折在「筛选」按钮上，收起时也知道自己筛过什么 */
+function activeCount(active) {
+  if (!active) return 0;
+  return (
+    (active.q ? 1 : 0) +
+    (active.type && active.type !== 'all' ? 1 : 0) +
+    (active.album ? 1 : 0) +
+    ((active.tags || []).length)
+  );
+}
+
 /* ---------- 渲染：首屏 ---------- */
 
 function renderSortOptions(sorts) {
@@ -80,6 +102,28 @@ function renderSortOptions(sorts) {
     .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
     .join('');
   el.sort.value = state.filters.sort;
+}
+
+/**
+ * 首屏的图：用第一件「照片」当封面，配一行等宽图注。
+ * 只在第一次加载时落一次，之后筛选不再替换首屏（否则翻着翻着就跳一下）。
+ */
+function renderHero(items) {
+  if (state.heroReady || !el.hero.figure || !items) return;
+  const item = items.find((entry) => entry.kind === 'photo' && entry.imageUrl) ||
+    items.find((entry) => entry.imageUrl);
+  if (!item) return;
+
+  state.heroReady = true;
+  el.hero.image.src = item.imageUrl;
+  el.hero.image.alt = item.title;
+  el.hero.image.loading = 'eager';
+  el.hero.figure.hidden = false;
+  el.hero.caption.textContent = [
+    `01 — ${item.title}`,
+    item.subtitle,
+    (item.exifSummary || '').split(' · ')[0],
+  ].filter(Boolean).join(' / ');
 }
 
 function renderSite(site) {
@@ -105,17 +149,25 @@ function renderSite(site) {
   renderChips(el.tagFilter, 'tag', site.facets.tags.map((item) => ({ ...item, prefix: '#' })));
 }
 
-/* ---------- 渲染：作品列表 ---------- */
+/* ---------- 渲染：作品流 ---------- */
 
 function renderMetaView() {
   const shown = state.items.length;
   const total = state.meta ? state.meta.total : shown;
+  const active = activeCount(state.active);
 
   el.count.textContent = renderCountText(shown, total);
   el.empty.hidden = shown > 0;
   el.loadMore.hidden = !(state.meta && state.meta.hasMore);
   el.loadMore.disabled = false;
   el.reset.disabled = !apiHasActive(state.active);
+  if (el.filtersCount) {
+    el.filtersCount.textContent = active ? String(active) : '';
+    el.filtersCount.hidden = !active;
+  }
+  if (el.filtersToggle) {
+    el.filtersToggle.setAttribute('aria-label', active ? `筛选（已选 ${active} 项）` : '筛选');
+  }
 }
 
 function showError(message) {
@@ -147,6 +199,8 @@ async function refresh(options) {
     state.items = append ? state.items.concat(payload.items) : payload.items;
 
     renderCards(el.gallery, payload.items, { append });
+    layoutRows(el.gallery);
+    renderHero(state.items);
     syncChips({ type: el.typeFilter, album: el.albumFilter, tag: el.tagFilter }, state.active);
     syncAlbums(el.albums, state.active.album);
     renderMetaView();
@@ -165,6 +219,15 @@ function setFilter(patch) {
 
 /* ---------- 交互 ---------- */
 
+/** 主题按钮显示的是「点了会切到哪一边」 */
+function syncThemeLabel() {
+  const isDark = document.documentElement.dataset.theme === 'dark';
+  if (el.themeLabel) el.themeLabel.textContent = isDark ? '日间' : '夜间';
+  if (el.themeToggle) {
+    el.themeToggle.setAttribute('aria-label', isDark ? '切换到日间模式' : '切换到夜间模式');
+  }
+}
+
 function bindEvents() {
   // 搜索（防抖 250ms，服务端负责匹配）
   let timer = 0;
@@ -182,6 +245,13 @@ function bindEvents() {
   });
 
   el.sort.addEventListener('change', () => setFilter({ sort: el.sort.value }));
+
+  // 筛选抽屉：默认收起，工具栏因此只有一行
+  el.filtersToggle.addEventListener('click', () => {
+    const open = el.filtersToggle.getAttribute('aria-expanded') === 'true';
+    el.filtersToggle.setAttribute('aria-expanded', String(!open));
+    el.filtersPanel.hidden = open;
+  });
 
   el.reset.addEventListener('click', () => {
     state.filters = {
@@ -223,7 +293,7 @@ function bindEvents() {
     setFilter({ tags: [...next] });
   });
 
-  // 相册卡片 → 筛选该相册
+  // 系列专题块 → 筛选该系列
   el.albums.addEventListener('click', (event) => {
     const card = event.target.closest('[data-album]');
     if (!card) return;
@@ -231,8 +301,8 @@ function bindEvents() {
     document.getElementById('gallery')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
-  // 作品网格（事件委托）→ 打开灯箱
-  // 外链视频的卡片是 <a target=_blank>（站内不播放，点了直接去原站），
+  // 作品流（事件委托）→ 打开灯箱
+  // 外链视频是 <a target=_blank>（站内不播放，点了直接去原站），
   // 它们不带 data-open，所以下面这段自然会跳过它们；灯箱里也只用「站内能放」的条目。
   el.gallery.addEventListener('click', (event) => {
     const id = resolveCardId(event);
@@ -250,10 +320,11 @@ function bindEvents() {
     refresh({ append: true });
   });
 
-  // 主题切换（记忆到 localStorage）
+  // 主题切换（记忆到 localStorage，首屏由 theme.js 提前落好）
   el.themeToggle.addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
+    syncThemeLabel();
     try {
       localStorage.setItem('cot-theme', next);
     } catch {
@@ -274,8 +345,14 @@ function bindEvents() {
 
 async function bootstrap() {
   el.year.textContent = String(new Date().getFullYear());
+  syncThemeLabel();
   renderSkeleton(el.gallery, 6);
+  layoutRows(el.gallery);
   bindEvents();
+
+  // 作品流是等高拼接：宽度一变就重新分行；图片解码后发现比例不对也要重排
+  watchLayout(el.gallery);
+  watchRatios(el.gallery, layoutRows);
 
   try {
     renderSite(await fetchSite());

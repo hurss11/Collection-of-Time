@@ -361,6 +361,8 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 3. **公开端同理**。`/api/public/gallery` 已经把搜索、相册/标签/类型筛选、排序、分页
    做完，并返回可直接展示的 `subtitle` / `dateText` / `durationText` / `exifSummary` /
    `imageMissing` / `watchUrl` / `linkStatusText` 等字段，前端不再拼这些文案。
+   其中 `width` / `height` 是从 `exif.dimensions`（照片）或 `resolution`（视频）解析出的
+   原始像素数，专供作品流**等高拼接**分行用；取不到时为 `0`，前端按 3:2 兜底。
 
 上传也是「后端调度、前端展示」：`POST /api/upload` 一次可带多个 `files`，
 返回 `results[]`（逐个文件的成功/失败与 `warnings`）与 `summary`，
@@ -637,6 +639,14 @@ Photography/
 ├── assets/
 │   ├── css/{main.css, lightbox.css}
 │   ├── js/                   # 作品集前端：取数、渲染、灯箱（薄客户端）
+│   │   ├── app.js            # 取数与事件装配
+│   │   ├── data.js           # /api/public/* 客户端
+│   │   ├── gallery.js        # 作品流 / 系列专题块 / chips 渲染
+│   │   ├── justify.js        # 等高拼接：按宽高比分行
+│   │   ├── theme.js          # 首屏同步定主题（避免闪一下）
+│   │   ├── lightbox.js       # 灯箱
+│   │   ├── cover.js          # 本地视频没封面时抓一帧
+│   │   └── exif.js           # 原文件 EXIF 解析
 │   ├── img/                  # 照片资源（当前为 SVG 占位图）
 │   └── video/                # 视频资源，详见 assets/video/README.md
 ├── .run/                     # 运行状态：admin.pid、admin.log、link-status.json、更新状态（已 gitignore）
@@ -649,7 +659,8 @@ Photography/
 ```mermaid
 graph TD
   app[app.js 取数与事件装配] --> data[data.js 公开 API 客户端]
-  app --> gallery[gallery.js 卡片/相册/chips 渲染]
+  app --> gallery[gallery.js 作品流/系列/chips 渲染]
+  app --> justify[justify.js 等高拼接分行]
   app --> lightbox[lightbox.js 灯箱]
   gallery --> data
   lightbox --> data
@@ -661,6 +672,16 @@ graph TD
 
 > 渲染模块不含业务规则：过滤、排序、分页、统计、EXIF 文案与解析都在后端。
 > 浏览器只把 `/api/public/*` 返回的结构画出来。
+>
+> 作品流是**等高拼接（justified rows）**：`gallery.js` 把每件作品渲染成带 `data-ar`
+> （宽高比）的 `.shot`，`justify.js` 再按宽高比分行 —— 行内每件的 `flex-grow` 取自己的
+> 宽高比，于是同一行行高必然一致，盒子比例 = 照片比例，**照片不会被裁成统一的 3:2**。
+> 宽高比来自服务端（`query.py` 的 `media_size()` 读 `exif.dimensions` / `resolution`），
+> 所以首屏不必等图片解码，行高不会跳；图片真正解码后若与记录不符，会就地纠正一次。
+> 两者靠 DOM 耦合：`gallery.js` 只吐节点，`justify.js` 只按节点重排行结构。
+>
+> `theme.js` 是一段同步脚本，必须放在 `<head>`：`app.js` 是 module（延迟执行），
+> 等它跑起来再切主题会先闪一下。默认浅色（暖白纸面），用户明确选过深色才用深色。
 >
 > 唯一一处「前端动手写数据」的是 `cover.js`：本地视频没封面时，在第一次播放的那一刻
 > 抓一帧发给后台（`POST /api/videos/<id>/poster`）。**只有浏览器知道用户看到的是哪一帧**，
@@ -688,7 +709,7 @@ graph TD
 | `title` | string | 标题 |
 | `album` | string | 所属相册 id |
 | `src` | string | 大图路径（灯箱使用） |
-| `thumb` | string | 缩略图路径（网格使用），省略则回退到 `src` |
+| `thumb` | string | 缩略图路径（作品流使用），省略则回退到 `src` |
 | `date` | string | 拍摄时间，`YYYY-MM-DD HH:mm:ss` |
 | `location` | string | 地点 |
 | `description` | string | 描述 |
@@ -871,7 +892,8 @@ YouTube，这比代码问题常见得多。一条命令看清：
 
 ## 视频支持
 
-- **统一网格**：照片与视频在同一个网格里按时间排序，卡片上以播放按钮 + 时长角标区分，
+- **统一作品流**：照片与视频在同一个作品流里按时间排序、**等高拼接**（行内行高一致，
+  照片按原始比例显示、不裁切），视频以播放按钮 + 时长角标区分，
   工具栏「类型」chips 可一键只看照片或只看视频。
 - **外链只存链接，播放交回原站**：站内**不**嵌入外链播放器（CSP 里 `frame-src 'none'`）。
   前台外链卡片本身就是一个 `<a target="_blank" rel="noopener noreferrer">`，点/new 标签
@@ -1000,9 +1022,11 @@ YouTube，这比代码问题常见得多。一条命令看清：
   站内只保存链接、封面与「资源还在不在」，点卡片在**新标签打开原站**（见「数据格式 → videos」）；
   封面可**自动抓取**（只访问白名单域名，`--no-net-fetch` 可关闭出网；抖音 / 小红书只能手动上传，
   跳原站时原样保留分享链接里的 `xsec_token`）。
-- **主题切换**：深色 / 浅色，写入 `localStorage` 记忆。
+- **主题切换**：默认浅色（暖白纸面），可切到「夜间阅读」深色；选择写入 `localStorage`，
+  由 `<head>` 里的同步脚本 `theme.js` 在首次绘制前落到 `<html>` 上，切换时不闪。
 - **快捷键**：`/` 聚焦搜索框。
-- **响应式与无障碍**：移动端自适应网格、`aria-pressed` 状态、`prefers-reduced-motion` 支持。
+- **响应式与无障碍**：作品流按容器宽度自动重新分行（手机一张一行、桌面三到四张一行）、
+  `aria-pressed` 状态、`prefers-reduced-motion` 支持。
 - **内容后台**：零依赖的 Python 后台，登录认证 + 增删改查 + 上传 + 元数据自动识别 + 自动备份与回滚。
 - **元数据识别**：上传图片自动读 EXIF（JPEG / TIFF / PNG / WebP），上传视频自动读
   时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间（MP4 / MOV / MKV / WebM / AVI，**不需要 ffprobe**）。
