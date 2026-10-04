@@ -51,6 +51,8 @@ chmod +x run.sh          # 首次
 | `./run.sh doctor` | 环境自检：Python 版本、必需文件、写权限、JSON 合法性、上游代码是否被本地改动、端口占用 |
 | `./run.sh net-check` | 自检外链封面抓取要用的域名能否连上（出网问题一眼看清） |
 | `./run.sh link-check` | 检查所有外链视频「还在不在」，结果写进 `.run/link-status.json`（后台「检查外链」按钮同款） |
+| `./run.sh faststart [--check]` | 把 MP4/MOV 的索引挪到文件开头（边下边播）：`-c copy` 不重新编码，就地原子替换；`--check` 只列出待处理文件 |
+| `./run.sh prune-media` | 清理「悬空引用」（条目指向已删的文件，前台显示「缺失」）与「孤儿文件」（媒体目录里没人引用的散图）；默认只演练，加 `--delete` 才动手（删条目走 `store`，动手前自动备份） |
 | `./run.sh install-ffmpeg` | 下载 FFmpeg 静态构建到 `bin/`（可透传 `--check` / `--file` / `--url` 等） |
 | `./run.sh create-user` / `reset-password` | 创建管理员 / 重置密码 |
 | `./run.sh systemd [--install]` | 生成 systemd 单元（加 `--install` 需 root，直接写入并启用） |
@@ -320,7 +322,7 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | `GET /api/item/{集合}/{id}` | 单条详情，`values` 为已摊平的表单值，直接填控件 |
 | `POST /api/items/{集合}` | 新增 / 编辑；校验失败返回 400 + `fieldErrors[{field,message}]` |
 | `DELETE /api/items/{集合}/{id}[/file]` | 删除条目；加 `/file` 同时删除媒体文件 |
-| `POST /api/upload` | **批量**上传（字段 `files` 可重复；可另带 `posterFile` 作为本批视频的封面）；逐文件返回结果，失败不影响其它文件 |
+| `POST /api/upload` | **批量**上传（字段 `files` 可重复；可另带 `posterFile` 作为本批视频的封面）；逐文件返回结果，失败不影响其它文件。**整批全失败时回 400**（body 里仍带 `results` 与 `summary`），部分成功回 200 + `summary.failed` |
 | `POST /api/videos/{id}/poster` | 为某个视频设置封面：上传图片（`file`）或抓帧（`time`，默认 0 = 第一帧） |
 | `POST /api/assets/poster` | 上传一张封面素材（`file`，仅图片），返回 `{path, url}` —— 给「新增视频」用：条目还没有 id，先拿路径再回填表单 |
 | `POST /api/assets/thumb` | 按 `{provider, src}` 自动抓取外链视频封面（仅白名单域名、见「外链封面的自动获取」）；`--no-net-fetch` 时返回 400 |
@@ -379,6 +381,12 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 - 默认只监听 `127.0.0.1`，外部访问不到；
 - 除公开接口外，所有 API 都要求有效会话；
 - 上传有扩展名白名单、单文件 512MB 上限、单批 480MB 上限（**边收边判**，超限立刻中断）；
+  文件名还会做**全名所有段**的危险扩展名判定：`shell.php.jpg` 这类双扩展名会被直接拒绝
+  （当前架构下它不可利用——静态文件是 Python 按最后一跳给 `Content-Type` 提供的，
+  但换个前置服务器就会变成真的执行漏洞，而且这类名字没有正常用途）；
+  整批文件**全部**失败时接口回 400（body 里仍带逐条 `results`），不再把 `ok=false` 藏在 200 里；
+- **明文 HTTP 访问后台时会提醒**：登录页上方直接标出「明文 HTTP 连接」，登录后再补一条 toast ——
+  后台只应通过 HTTPS 反代或 SSH 隧道访问（`Secure` Cookie 与登录口令都依赖这一点）；
 - **出网只有一个口子**：外链封面自动抓取与外链状态检查（`adminlib/thumbs.py` 负责实际请求，
   `adminlib/linkcheck.py` 只借它地问官方接口）。两者都**不请求用户填的链接**，
   只访问白名单域名（服务商官方接口 + 缩略图 CDN）、只走 https、拒绝 IP 与 userinfo、
@@ -428,13 +436,19 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 
 ### 静态资源与缓存
 
-- HTML 外壳与 `/api/**` 一律 `no-store`：升级后打开即是新页面，接口响应不会被缓存；
+- `/api/**` 一律 `no-store`：接口响应不会被缓存；
+- HTML 外壳（`/`、`/index.html`、`/admin/`）用 `public, no-cache` + `Last-Modified`：
+  **可以存下来，但用之前必须重验证**，没改就回 `304`（以前是 `no-store`，
+  每次访问都要重下整份 HTML），改了立刻拿到新的；
 - `/assets/**`、`/admin/js|css/**`、`favicon.svg` 用 `public, no-cache`：**允许缓存但每次重验证**，
   命中 `304` 只回响应头，刷新时省掉整包流量（实测首屏 JS/CSS 从 53KB 降到 1.5KB），
   同时改完文件刷新立刻生效——不会出现「长缓存看到旧封面」的问题。
-- 之所以不给这些文件加 `max-age`+`immutable`：封面、缩略图、视频都是**固定文件名就地替换**的
-  （`assets/video/posters/<id>.jpg`），长缓存会让人看到旧图。若将来给文件名加内容指纹，
-  就可以在反代层放心开一年长缓存。
+- **例外**：上传的照片（`/assets/img/photos/**`，不含 `thumbs/`）给 `max-age=3600`。
+  它们的文件名由 `store.unique_path` 生成、**绝不就地覆盖**（同名上传会变成 `x-1.jpg`），
+  所以长缓存是安全的，翻相册时省掉逐张 304 的往返。
+- 之所以不给其它文件加 `max-age`+`immutable`：封面、缩略图、视频都是**固定文件名就地替换**的
+  （`assets/video/posters/<id>.jpg`、`./run.sh faststart` 重写的 mp4），长缓存会让人看到旧图。
+  若将来给文件名加内容指纹，就可以在反代层放心开一年长缓存。
 - 把静态文件交给 nginx 托管时（`./run.sh https --static` + 后端 `--no-static`），
   nginx 用 `expires -1` 达到同样效果：命中 304 不传内容，改完立刻生效。
   那一版配置会把前台需要的 CSP / HSTS 等安全头一并写到 `location` 里——
@@ -551,6 +565,8 @@ sudo ./run.sh systemd --install
 - **视频**：读时长 / 分辨率 / 帧率 / 编码 / 设备 / 创建时间 —— 有 ffprobe 时用它，
   没有就用 `adminlib/videometa.py` 直接解析容器（MP4/MOV、MKV/WebM、AVI 都支持），
   并用容器里的 `creation_time` 填条目的 `date`；用 ffmpeg 在「2 秒」与「时长 10%」中取较早的时间点抓帧作封面。
+  顺带看一眼**索引（moov）在不在文件开头**：相机 / 剪辑软件导出的 MP4 常常把它放在末尾，
+  那样浏览器要下完整份才能起播，上传成功时会给出提示并指向 `./run.sh faststart`。
 - **没装任何东西也能用**：元数据识别不依赖外部程序；缺 ffmpeg 时只是跳过缩略图与封面，返回明确的警告提示。
 - **「未分类」相册**：上传时没选相册的条目会挂到 id 为 `uncategorized` 的「未分类」相册下。
   这条记录**不会凭空出现**：上传到它时、或启动时发现已有条目引用它时才自动补建，
@@ -580,7 +596,7 @@ Photography/
 │   ├── query.py              # 搜索 / 筛选 / 排序 / 分页 + 展示投影（公开端与后台共用）
 │   ├── schema.py             # 表单字段定义、提交值归一化、字段级校验
 │   ├── exifread.py           # 标准库图片 EXIF 解析（JPEG / TIFF / PNG / WebP）
-│   ├── videometa.py          # 标准库视频容器解析（MP4/MOV、MKV/WebM、AVI 的时长/分辨率/帧率/编码/设备）
+│   ├── videometa.py          # 标准库视频容器解析（时长/分辨率/帧率/编码/设备 + moov 位置判定）
 │   ├── autoupdate.py         # 代码更新：只换代码路径、只快进、作者白名单、可回滚、只提醒的定时检查
 │   ├── thumbs.py             # 外链封面抓取（唯一出网点：白名单域名 + 硬上限）
 │   ├── linkcheck.py          # 外链「还在不在」：服务商官方接口判定 + .run/link-status.json
@@ -597,6 +613,8 @@ Photography/
 │       └── app.js            # 事件装配与取数调度
 ├── tools/
 │   ├── make_posters.py       # 用 ffmpeg 批量生成视频封面
+│   ├── faststart.py          # 把 MP4/MOV 的索引挪到文件开头（边下边播；--check 只看不改）
+│   ├── prune_media.py        # 清理悬空引用（条目指向已删的文件）与孤儿文件（默认只演练）
 │   ├── check_https.py        # 线上自检：反代头、Secure Cookie、白名单
 │   └── fetch_ffmpeg.py       # 下载 / 校验 / 安装 FFmpeg 静态构建到 bin/
 ├── bin/                      # 内置 ffmpeg、ffprobe（已 gitignore，只保留 README）
@@ -827,6 +845,13 @@ YouTube，这比代码问题常见得多。一条命令看清：
   「<来源>打开 ↗」的提示；灯箱只装站内可播的条目（照片与本地视频），不会把外链排进去。
 - **本地视频播放**：原生 `<video controls>`，切换媒体时自动暂停并卸载上一个播放器，
   避免后台继续播放。
+- **边下边播（faststart）**：MP4 的索引（`moov`）放在文件开头时，浏览器拿到开头就能起播；
+  放在末尾（相机、剪辑软件导出的常见默认）就要**下完整份**才能播 —— 一段 128MB 的延时片
+  在手机上表现成「点了播放，半天没动静」。两处配套：
+  - 上传时自动判定，索引在末尾就给出提示；
+  - `./run.sh faststart`（`python tools/faststart.py`）就地改造：`-c copy` 只换容器结构、
+  不重新编码，先写临时文件并校验索引与新时长，再原子替换；`--check` 只列出不修改（可挂 cron），
+  磁盘余量不足会拒绝（`--force` 可越过）。`./run.sh doctor` 也会顺带报一句。
 - **视频封面**：
   - 上传本地视频时，若勾选「自动抓取第一帧」且未指定封面，后端用 ffmpeg 抓取**第 0 秒（第一帧）**；
   - 上传时也可以直接附带一张封面图片（上传面板的「视频封面（可选）」），优先级高于抓帧；
@@ -923,6 +948,10 @@ YouTube，这比代码问题常见得多。一条命令看清：
   也能在后台直接**上传封面图片**（每行的「封面」按钮，或新增 / 编辑表单里的「上传图片…」），
   外链视频必须提供（站内不播放，卡片上显示的就是这张图）；未设置封面的本地视频会在后台
   「数据完整性」中列出。
+- **边下边播**：上传时判定 MP4 的索引位置，`moov` 在末尾（相机导出的常见默认）会提示，
+  `./run.sh faststart` 就地改成 faststart（`-c copy`，不重新编码）。
+- **维护命令**：`./run.sh doctor`（含「代码版本」「视频索引」检查）、
+  `./run.sh prune-media`（悬空引用 / 孤儿文件）、`./run.sh link-check`（外链是否还在）。
 - **外链视频**：YouTube / 哔哩哔哩 / Vimeo / 任意地址，填链接或裸 ID 即可，站内只保存链接、
   封面与「资源还在不在」，点卡片在**新标签打开原站**（见「数据格式 → videos」）；
   封面可**自动抓取**（只访问白名单域名，`--no-net-fetch` 可关闭出网）。

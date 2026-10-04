@@ -60,6 +60,12 @@
           <span class="pwd-strength__label muted"></span>
         </div>
 
+        <p class="login__warn" id="login-insecure" hidden>
+          <strong>明文 HTTP 连接</strong>：密码与登录凭据会在网络中裸传。
+          请只从本机或内网访问，或配上 HTTPS 反向代理（<code>./run.sh https</code>）；
+          临时方案是 SSH 端口转发。
+        </p>
+
         <p class="login__error" id="login-error" role="alert" hidden></p>
 
         <button class="btn btn--primary btn--block" id="login-submit" type="submit">登录</button>

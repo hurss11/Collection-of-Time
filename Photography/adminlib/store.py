@@ -63,6 +63,47 @@ class BackupInfo:
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _SLUG_KEEP = re.compile(r"[^\w.\-]+", re.UNICODE)
 
+# 这些扩展名**出现在文件名的任何一段**（不只是最后一段）都要拒绝。
+#
+# 起因是一次后台安全测试：`shell.php.jpg` 的最后一段是 `.jpg`，落在上传白名单里，
+# 于是整份名字被原样落盘。当前架构下它不可利用（静态文件由 Python 提供，
+# Content-Type 按最后一跳算 `image/jpeg`，谁也不会去执行它），但这是典型的
+# 「双扩展名绕过」：换个前置服务器（nginx 配了 `location ~ \.php`，或哪天把站点搬到
+# Apache/IIS）就会变成真的 RCE。而且这类名字没有任何正常用途 —— 照片不会叫
+# `假期.php.jpg`。所以这里做「全名所有段」的判定，纵深防御。
+DANGEROUS_SUFFIXES = frozenset({
+    # 脚本 / 服务端
+    ".php", ".php3", ".php4", ".php5", ".php7", ".php8", ".phtml", ".pht", ".phar", ".phps",
+    ".asp", ".aspx", ".ascx", ".ashx", ".asmx", ".jsp", ".jspx", ".jspf", ".do", ".action",
+    ".cgi", ".fcgi", ".pl", ".pm", ".py", ".pyc", ".pyo", ".rb", ".lua", ".tcl",
+    # 可执行 / 库 / 安装包
+    ".exe", ".com", ".scr", ".msi", ".msp", ".dll", ".so", ".dylib",
+    ".jar", ".war", ".ear", ".class", ".apk", ".dmg", ".deb", ".rpm", ".app",
+    # shell / 批处理 / 脚本宿主
+    ".sh", ".bash", ".zsh", ".fish", ".csh", ".ksh", ".bat", ".cmd", ".vbs", ".vbe",
+    ".js", ".mjs", ".cjs", ".jsx", ".ps1", ".psm1", ".psd1", ".hta",
+    # 会被浏览器当文档/脚本执行的
+    ".htm", ".html", ".xhtml", ".shtml", ".svg", ".svgz", ".xml", ".xsl", ".xslt", ".swf", ".wasm",
+    # 配置 / 凭据 / 数据库
+    ".htaccess", ".htpasswd", ".ini", ".conf", ".cfg", ".env", ".sql", ".db",
+    ".yaml", ".yml", ".toml", ".json", ".pem", ".key", ".crt", ".p12", ".pfx",
+})
+
+
+def dangerous_suffix(name: str) -> str:
+    """文件名里若有任何一段是危险扩展名，返回那一段（含点）；否则返回空串。
+
+    `shell.php.jpg` → `.php`；`2024.10.03-sunset.jpg` → `""`（合法的带点名字不受影响）。
+    """
+    raw = unicodedata.normalize("NFKC", str(name or "")).strip().lower()
+    segments = raw.split(".")
+    # 第一段是主名（`archive.tar.gz` 里 `archive`），最后一段由调用方按白名单校验
+    for segment in segments[1:]:
+        candidate = f".{segment}"
+        if candidate in DANGEROUS_SUFFIXES:
+            return candidate
+    return ""
+
 
 def safe_filename(name: str, *, fallback: str = "file") -> str:
     """把用户上传的文件名清洗成安全的文件名（保留扩展名）。"""

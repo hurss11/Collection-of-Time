@@ -575,6 +575,54 @@ def detect_container(path: Path) -> str:
     return "unknown"
 
 
+# faststart 判定结果
+FASTSTART_OK = "faststart"          # moov 在 mdat 之前：浏览器拿到开头就能起播
+FASTSTART_SLOW = "moov-at-end"      # moov 在 mdat 之后：要下完整份文件才知道怎么播
+FASTSTART_UNKNOWN = ""              # 非 MP4/MOV（或读不出来）：不适用
+
+
+def faststart_state(path: str | Path) -> str:
+    """判断 MP4/MOV 的索引（moov）位置，用来提醒「要不要 remux 成 faststart」。
+
+    只扫顶层 box 的顺序 —— 不读 moov 内容，所以对几百 MB 的片子也只是几次 seek。
+    读不出来（不是 ISOBMFF、文件损坏）一律返回 `FASTSTART_UNKNOWN`，绝不报错。
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return FASTSTART_UNKNOWN
+    if detect_container(file_path) != "isobmff":
+        return FASTSTART_UNKNOWN
+
+    seen_mdat = False
+    reader: _Reader | None = None
+    try:
+        reader = _Reader(file_path)
+        offset, end = 0, reader.size
+        while offset + 8 <= end:
+            box = _box_at(reader, offset, end)
+            if box is None:
+                break
+            kind, body, size = box
+            if kind == b"mdat":
+                seen_mdat = True
+            elif kind == b"moov":
+                return FASTSTART_SLOW if seen_mdat else FASTSTART_OK
+            step = (body - offset) + size         # 头部长度 + 内容长度
+            if step <= 0:                         # 病态 box：别再往下数了
+                break
+            offset += step
+    except (OSError, struct.error, ValueError, IndexError, KeyError):
+        return FASTSTART_UNKNOWN
+    finally:
+        if reader is not None:
+            reader.close()
+    return FASTSTART_UNKNOWN
+
+
+FASTSTART_HINT = ("索引（moov）在文件末尾，浏览器要把整份视频下完才能起播；"
+                  "跑 ./run.sh faststart（或 python tools/faststart.py）即可改成「边下边播」")
+
+
 def probe(path: str | Path) -> dict[str, object]:
     """解析视频元数据；任何异常都退化成空字段（不影响上传流程）。"""
     info = empty_info()

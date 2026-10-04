@@ -14,6 +14,8 @@
 #   ./run.sh install-ffmpeg 下载 FFmpeg 静态构建到 bin/（随项目打包到服务器）
 #   ./run.sh net-check      自检外链封面抓取所需的域名能否连上
 #   ./run.sh link-check     检查外链视频是否还能打开
+#   ./run.sh faststart      把 MP4/MOV 的索引挪到文件开头（边下边播）
+#   ./run.sh prune-media    清理悬空引用（条目指向已删的文件）与孤儿文件
 #   ./run.sh package        打成可迁移到服务器的 tar.gz（含 FFmpeg，默认 linux-x64）
 #   ./run.sh create-user    创建管理员账号
 #   ./run.sh reset-password 重置管理员密码
@@ -539,6 +541,43 @@ PY
     [ "$mode" != "600" ] && [ "$mode" != "?" ] && warn "           建议收紧权限： chmod 600 admin.config.json"
   else
     warn "管理员   : 尚未创建 —— 首次启动会自动引导，或执行 ./run.sh create-user"
+  fi
+
+  # 视频索引位置：moov 在末尾时浏览器要下完整份才起播（只读 box 头，很快）
+  if [ -n "$PY_BIN" ]; then
+    local slow_videos
+    slow_videos="$(py - <<'PY' 2>/dev/null
+import pathlib, sys
+sys.path.insert(0, ".")
+try:
+    from adminlib import videometa
+except Exception:                      # 代码不完整时不挡自检
+    print(0); raise SystemExit
+video_dir = pathlib.Path("assets/video")
+slow = 0
+if video_dir.is_dir():
+    for path in video_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in (".mp4", ".m4v", ".mov"):
+            continue
+        if set(path.relative_to(video_dir).parts[:-1]) & {"originals", "raw", "posters", "thumbs"}:
+            continue
+        try:
+            if videometa.faststart_state(path) == videometa.FASTSTART_SLOW:
+                slow += 1
+        except Exception:
+            pass
+print(slow)
+PY
+)" || slow_videos=""
+    case "$slow_videos" in
+      ""|*[!0-9]*) slow_videos=0 ;;
+    esac
+    if [ "$slow_videos" -eq 0 ]; then
+      ok "视频索引 : 全部在文件开头（faststart，可边下边播）"
+    else
+      warn "视频索引 : 有 $slow_videos 个 MP4 的索引在文件末尾，浏览器要下完整份才能起播"
+      info "           就地改造： ./run.sh faststart（只换容器结构、不重新编码；--check 只看不改）"
+    fi
   fi
 
   # 端口
@@ -1661,6 +1700,8 @@ Photography 一键运行脚本
   ./run.sh ffmpeg-status   查看当前使用的是哪个 ffmpeg
   ./run.sh net-check       自检：外链封面抓取要用的域名能不能连上（出网问题一眼看清）
   ./run.sh link-check      检查外链视频是否还能打开（有失效的会以非 0 退出）
+  ./run.sh faststart       把 MP4/MOV 的索引挪到文件开头（边下边播；--check 只看不改）
+  ./run.sh prune-media     清理「悬空引用」（条目指向已删的文件）与「孤儿文件」（没人引用）
   ./run.sh package         打包迁移到服务器：dist/photography-<平台>-<时间>.tar.gz
   ./run.sh create-user     创建管理员账号
   ./run.sh reset-password  重置管理员密码
@@ -1732,6 +1773,8 @@ main() {
     adopt|takeover) adopt "$@" ;;
     net-check)      require_python; py admin.py --net-status ;;
     link-check)     require_python; py admin.py --check-links ;;
+    faststart)      require_python; py tools/faststart.py "$@" ;;
+    prune-media|prune) require_python; py tools/prune_media.py "$@" ;;
     https|https-proxy|ssl) https "$@" ;;
     help|-h|--help) usage ;;
     *)              err "未知命令：$command"; info ""; usage; exit 2 ;;

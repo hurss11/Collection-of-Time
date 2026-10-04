@@ -38,6 +38,11 @@ IMAGE_DIR = ROOT_PATH / "assets" / "img" / "photos"
 STATIC_ROOT_FILES = {"index.html", "favicon.svg"}
 STATIC_ROOT_DIRS = {"assets", "data"}
 
+# 缓存策略（与 admin.py 保持一致，见那边 cache_control() 的说明）
+CACHE_MEDIA_PREFIXES = ("/assets/img/photos/",)
+CACHE_MEDIA_EXCLUDE = ("/assets/img/photos/thumbs/", "/assets/video/posters/")
+CACHE_MEDIA_MAX_AGE = 3600
+
 STORE = store.Store(ROOT_PATH)
 
 
@@ -56,11 +61,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return self.server_version
 
     def cache_control(self) -> str:
-        """静态资源缓存但重验证（304 省流量且改完立刻生效），其余不缓存。"""
+        """与 admin.py 同一套策略。
+
+        - 上传的照片（不含缩略图）：可以长缓存（文件名唯一，绝不就地覆盖）；
+        - 其它静态资源：缓存但每次重验证（304 省流量，改完刷新立刻生效）；
+        - HTML 外壳：缓存 + 重验证（以前是 no-store，每次都要重下整份 HTML）。
+        """
         path = self.path.split("?", 1)[0]
-        if path.startswith(("/assets/", "/admin/js/", "/admin/css/")) or path == "/favicon.svg":
-            return "public, no-cache"
-        return "no-store, must-revalidate"
+        if path.startswith("/api/"):
+            return "no-store"
+        if (path.startswith(CACHE_MEDIA_PREFIXES) and not path.startswith(CACHE_MEDIA_EXCLUDE)
+                and getattr(self, "_serving_file", False)):
+            return f"public, max-age={CACHE_MEDIA_MAX_AGE}"
+        return "public, no-cache"
 
     def end_headers(self) -> None:  # noqa: D102
         self.send_header("Cache-Control", self.cache_control())
@@ -76,7 +89,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "style-src 'self'",
             "img-src 'self' data: https: http:",
             "media-src 'self' https: http:",
-            "frame-src https: http:",
+            "frame-src 'none'",
             "connect-src 'self'",
             "font-src 'self'",
             "frame-ancestors 'self'",
@@ -120,6 +133,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if target.is_file():
             # 视频进度条 / 拖拽需要 206（详见 adminlib/ranges.py）
             self._accept_ranges = True
+            # 只有真要送出文件时才允许长缓存：404/403 不该被浏览器存一小时
+            self._serving_file = True
             size = target.stat().st_size
             rng = ranges.parse_single_range(self.headers.get("Range") or "", size)
             if rng is not None:
@@ -239,6 +254,8 @@ class Server(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    # 见 admin.py 里的说明：默认 5 太小，媒体元素并发开多个 Range 请求时会丢 SYN
+    request_queue_size = 128
 
     def handle_error(self, request, client_address) -> None:     # noqa: ANN001
         exc = sys.exc_info()[1]

@@ -609,6 +609,16 @@ async function startUpload() {
     views.renderUploadResult({ results, summary });
     toast(`上传结束：成功 ${summary.ok} / ${summary.total}`, summary.failed ? 'warn' : 'ok');
   } catch (error) {
+    // 整批全失败时服务端回 400，但 body 里照样带 results —— 逐条原因不能丢
+    const payload = error.payload || {};
+    const batchResults = Array.isArray(payload.results) ? payload.results : [];
+    if (batchResults.length) {
+      results.push(...batchResults);
+      const batch = payload.summary || {};
+      summary.total += batch.total ?? 0;
+      summary.ok += batch.ok ?? 0;
+      summary.failed += batch.failed ?? 0;
+    }
     toast(`上传失败：${error.message}`, 'err', 6000);
     setHint(error.message, 'err');
     views.renderUploadProgress({

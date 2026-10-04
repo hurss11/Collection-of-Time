@@ -14,6 +14,24 @@ let mode = 'login';          // 'login' | 'setup'
 let lockTimer = 0;
 let lockUntil = 0;           // 限流锁定到期的时间戳，0 表示未锁定
 
+/**
+ * 这次访问是不是「明文 HTTP 且不是本机」。
+ *
+ * 后台会话 Cookie 只有在 HTTPS 下才带 `Secure`，口令本身更是每次都明文提交，
+ * 所以从公网 IP 直接走 http 访问后台时，必须在拿到密码**之前**提醒一句 ——
+ * 这正是安全测试里反复出现的「忘了配 HTTPS」那一类问题。
+ */
+export function insecureTransport() {
+  if (location.protocol !== 'http:') return false;
+  const host = (location.hostname || '').toLowerCase();
+  return !(
+    host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+    || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')
+    || /^10\./.test(host) || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  );
+}
+
 /* ============================================================
    视图切换
    ============================================================ */
@@ -79,6 +97,9 @@ export function showLogin(message = '') {
   $('#boot').hidden = true;
   $('#view-login').hidden = false;
 
+  const warn = $('#login-insecure');
+  if (warn) warn.hidden = !insecureTransport();
+
   // 仍处于限流锁定时不要解锁按钮
   if (!lockUntil) {
     $('#login-submit').disabled = false;
@@ -97,6 +118,12 @@ function showApp(user) {
 
   $('#current-user').textContent = user?.username || '未登录';
   $('#current-user-since').textContent = user?.createdAt ? `创建于 ${user.createdAt}` : '';
+
+  // 登录之后再补一句（这时人已经在用后台，比登录页那一条更容易被忽略）
+  if (insecureTransport()) {
+    toast('当前是明文 HTTP 连接：口令与凭据会裸传，建议改用 HTTPS（./run.sh https）或 SSH 隧道',
+      'warn', 9000);
+  }
 }
 
 /* ============================================================

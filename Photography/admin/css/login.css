@@ -77,6 +77,20 @@
   font-size: 12.5px;
 }
 
+/* 明文 HTTP 访问的提醒（拿到密码之前就要看到） */
+.login__warn {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.login__warn code { font-family: var(--font-mono); font-size: 12px; }
+
 .login__foot {
   margin-top: 18px;
   padding-top: 14px;

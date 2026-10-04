@@ -302,6 +302,19 @@ def run_checks(args: argparse.Namespace) -> Reporter:
     api_cache = header_of(headers, "Cache-Control")
     report.add("no-store" in api_cache, "接口响应不缓存", f"Cache-Control: {api_cache or '(缺失)'}")
 
+    # 7.1 首页 HTML：可缓存但每次重验证（旧版是 no-store，每次访问都要重下整份 HTML）
+    status, headers, _ = fetch(base + "/", context=context)
+    html_cache = header_of(headers, "Cache-Control")
+    html_modified = header_of(headers, "Last-Modified")
+    report.add(status == 200 and "no-store" not in html_cache and bool(html_modified),
+               "首页 HTML 缓存策略",
+               f"Cache-Control: {html_cache or '(缺失)'}"
+               + ("" if html_modified else "；缺少 Last-Modified（重验证时会重下整份）"))
+    if status == 200 and html_modified:
+        status2, _, _ = fetch(base + "/", headers={"If-Modified-Since": html_modified}, context=context)
+        report.add(status2 == 304, "首页 HTML 重验证",
+                   f"带 If-Modified-Since 再请求 → {status2}（期望 304）")
+
     # 8. 反代层压缩：Python 3.12+ 里 .js 是 text/javascript，gzip_types 漏了它
     #    就等于前端 JS 一个都没压缩（首屏体积差 3 倍，很容易漏过去）
     status, headers, _ = fetch(base + "/assets/js/app.js",

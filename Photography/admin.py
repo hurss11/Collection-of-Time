@@ -82,10 +82,11 @@ PUBLIC_PREFIXES = ("/api/public/",)
 STATIC_ROOT_FILES = {"index.html", "favicon.svg"}
 STATIC_ROOT_DIRS = {"assets", "data"}
 
-# 允许「缓存但每次重验证」的路径：命中 304 时只回响应头，省掉整包流量；
-# 又因为是重验证而不是长缓存，改完刷新立刻生效（不会看到旧封面）。
-CACHE_REVALIDATE_PREFIXES = ("/assets/", "/admin/js/", "/admin/css/")
-CACHE_REVALIDATE_FILES = ("/favicon.svg",)
+# 可以长缓存的路径：上传的照片（文件名唯一、绝不就地覆盖）。
+# 缩略图与视频封面会被就地重算/替换，所以排除掉，仍然走「每次重验证」。
+CACHE_MEDIA_PREFIXES = ("/assets/img/photos/",)
+CACHE_MEDIA_EXCLUDE = ("/assets/img/photos/thumbs/", "/assets/video/posters/")
+CACHE_MEDIA_MAX_AGE = 3600                 # 秒；过期后仍会重验证，改了也只是多一次请求
 
 STORE = store.Store(ROOT)
 # 查找顺序：COT_FFMPEG 环境变量 → 项目 bin/ → 系统 PATH；verify 会真跑一次 -version
@@ -328,16 +329,22 @@ class Handler(SimpleHTTPRequestHandler):
         """按路径决定缓存策略。
 
         - `/api/**`：可能带会话数据，一律不缓存；
-        - 前端静态资源：允许缓存但每次重验证（命中 304 只回响应头），
-          刷新时省掉整包流量，同时改完立刻生效；
-        - HTML 外壳：不缓存，升级后打开就是新页面。
+        - 上传的照片（不含缩略图）：文件名由 `store.unique_path` 生成、绝不就地覆盖，
+          所以可以放心长缓存，省掉每次翻相册时逐张 304 的往返；
+        - 其它静态资源（代码、封面、视频、data/*.json）：允许缓存但每次重验证 ——
+          命中 304 只回响应头，刷新时省掉整包流量，改完又立刻生效
+          （封面、视频、缩略图都会**就地替换**，长缓存会让页面继续用旧图）；
+        - HTML 外壳：以前是 `no-store`，导致每次访问都要重下整份 HTML。
+          现在改成 `no-cache`（存下来但用之前必须重验证）+ `Last-Modified`，
+          没改就回 304，改了立刻拿到新的。
         """
         path = self.request_path().split("?", 1)[0]
         if path.startswith("/api/"):
             return "no-store"
-        if path.startswith(CACHE_REVALIDATE_PREFIXES) or path in CACHE_REVALIDATE_FILES:
-            return "public, no-cache"
-        return "no-store, must-revalidate"
+        if (path.startswith(CACHE_MEDIA_PREFIXES) and not path.startswith(CACHE_MEDIA_EXCLUDE)
+                and getattr(self, "_serving_file", False)):
+            return f"public, max-age={CACHE_MEDIA_MAX_AGE}"
+        return "public, no-cache"
 
     def end_headers(self) -> None:
         self.send_header("Cache-Control", self.cache_control())
@@ -770,6 +777,8 @@ class Handler(SimpleHTTPRequestHandler):
             # 声明支持 Range，并处理 `Range: bytes=…` → 206
             # （视频进度条 / 拖拽全靠它，见 adminlib/ranges.py 的说明）
             self._accept_ranges = True
+            # 只有真要送出文件时才允许长缓存：404/403 不该被浏览器存一小时
+            self._serving_file = True
             size = target.stat().st_size
             rng = ranges.parse_single_range(self.headers.get("Range") or "", size)
             if rng is not None:
@@ -801,7 +810,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not index.is_file():
             self.send_error_json("后台界面缺失：admin/index.html", HTTPStatus.NOT_FOUND)
             return
-        self._send(HTTPStatus.OK, index.read_bytes(), "text/html; charset=utf-8")
+        # 与前台首页一样：缓存但重验证（改完刷新就是新的，没改则 304）
+        modified_at = int(index.stat().st_mtime)
+        if self.not_modified(modified_at):
+            return
+        self._send(HTTPStatus.OK, index.read_bytes(), "text/html; charset=utf-8",
+                   extra=[("Last-Modified", self.date_time_string(modified_at))])
 
     def serve_admin_asset(self, path: str) -> None:
         relative = path[len("/admin/"):]
@@ -1559,21 +1573,39 @@ class Handler(SimpleHTTPRequestHandler):
             warnings.append("这次上传没有视频，附带的封面图片已忽略（照片请用「缩略图」）")
 
         remember("上传", f"{ok_count}/{len(results)} 个文件", ok=ok_count > 0)
-        self.send_json({
-            "ok": True,
+        payload = {
             "results": results,
             "summary": {"total": len(results), "ok": ok_count, "failed": len(results) - ok_count},
             "warnings": warnings,
             "tools": TOOLS.as_dict(),
-        })
+        }
+
+        if ok_count:
+            self.send_json({"ok": True, **payload})
+            return
+
+        # 一个都没成功：整批就是**失败**，不能把 ok=false 藏在 200 里 ——
+        # 只看状态码的调用方（脚本、监控、转发层）会把「全都失败」当成上传成功。
+        # 部分成功仍是 200：那是混合结果，summary.failed 与页面上的逐条结果已经说清了。
+        first = next((result.get("error") for result in results if result.get("error")), "")
+        reason = f"{len(results)} 个文件全部失败" + (f"：{first}" if first else "")
+        self.send_json({"ok": False, "error": reason, **payload}, HTTPStatus.BAD_REQUEST)
 
     def _handle_upload(self, upload: dict, fields: dict[str, str], album: str,
                        tags: list[str], cover: dict | None = None) -> dict:
-        """处理单个文件；失败只影响这一条，整体仍返回 200 供前端逐条显示。"""
+        """处理单个文件；失败只影响这一条（整批全失败时外层回 400）。"""
         name = store.safe_filename(upload.get("filename") or "", fallback="upload")
         try:
             if not upload.get("size"):
                 raise ApiError("文件内容为空")
+
+            # 先看全名里有没有危险扩展名（`shell.php.jpg` 这类双扩展名绕过）
+            dangerous = store.dangerous_suffix(name)
+            if dangerous:
+                raise ApiError(
+                    f"文件名里不能出现 {dangerous} 这类可执行扩展名（双扩展名会被利用来绕过白名单）；"
+                    f"请把文件重命名为纯照片 / 视频名，例如 sunset.jpg"
+                )
 
             suffix = Path(name).suffix.lower()
             if suffix not in ALLOWED_UPLOAD_SUFFIXES:
@@ -1706,6 +1738,10 @@ class Handler(SimpleHTTPRequestHandler):
         if not merged.get("duration") and not merged.get("resolution"):
             warnings.append("没能从视频里识别出时长 / 分辨率，请手动补充")
 
+        # 索引在文件末尾：浏览器要下完整份才能起播（相机导出的 MP4 常常是这样）
+        if videometa.faststart_state(target) == videometa.FASTSTART_SLOW:
+            warnings.append(videometa.FASTSTART_HINT)
+
         # 封面：上传时带了图片就用它；否则抓帧，默认第 0 秒（第一帧）
         if cover and cover.get("size"):
             poster, problems = self._store_cover(item_id, cover)
@@ -1750,8 +1786,22 @@ class Handler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _cover_suffix(filename: str) -> str:
-        suffix = Path(store.safe_filename(filename, fallback="cover")).suffix.lower()
+        """封面文件名的后缀；不是图片、或名字里有危险扩展名时返回空串。"""
+        cleaned = store.safe_filename(filename, fallback="cover")
+        if store.dangerous_suffix(cleaned):
+            return ""
+        suffix = Path(cleaned).suffix.lower()
         return suffix if suffix in media.IMAGE_SUFFIXES else ""
+
+    @staticmethod
+    def _cover_problem(filename: str) -> str:
+        """封面文件名不被接受时，说清是哪一种问题（否则只会看到「必须是图片」）。"""
+        cleaned = store.safe_filename(filename, fallback="cover")
+        dangerous = store.dangerous_suffix(cleaned)
+        if dangerous:
+            return (f"封面文件名里不能出现 {dangerous} 这类可执行扩展名"
+                    f"（双扩展名会被利用来绕过白名单）；请重命名成纯图片名，例如 cover.jpg")
+        return "封面必须是图片（jpg / png / webp / avif / tiff）"
 
     def _cover_target(self, item_id: str, suffix: str) -> Path:
         """一个视频只保留一张封面：assets/video/posters/<id><ext>。"""
@@ -1790,7 +1840,7 @@ class Handler(SimpleHTTPRequestHandler):
         """把上传的封面图片落盘，返回相对路径与提示。"""
         suffix = self._cover_suffix(cover.get("filename") or "")
         if not suffix:
-            return "", ["封面必须是图片（jpg / png / webp / avif / tiff）"]
+            return "", [self._cover_problem(cover.get("filename") or "")]
         target = self._cover_target(item_id, suffix)
         try:
             # 封面可能被同批次的多个视频共用，所以是复制而不是搬走临时文件
@@ -1874,7 +1924,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         suffix = self._cover_suffix(cover.get("filename") or "")
         if not suffix:
-            raise ApiError("封面必须是图片（jpg / png / webp / avif / tiff）")
+            raise ApiError(self._cover_problem(cover.get("filename") or ""))
 
         stem = Path(store.safe_filename(cover.get("filename") or "", fallback="cover")).stem
         target = store.unique_path(POSTER_DIR, f"up-{store.safe_filename(stem, fallback='cover')}{suffix}")
@@ -2050,6 +2100,10 @@ class Server(ThreadingHTTPServer):
 
     allow_reuse_address = True
     daemon_threads = True
+    # 已完成三次握手、还没被 accept 的连接队列长度。默认只有 5：一次并发上传或
+    # 几十个连接同时到达就会丢 SYN（客户端看到「连接被拒绝」），而这台机器上的
+    # 服务恰恰常在小内存 VPS 上跑。128 是常规值，代价只是内核多留一点队列内存。
+    request_queue_size = 128
 
     def handle_error(self, request, client_address) -> None:     # noqa: ANN001
         exc = sys.exc_info()[1]

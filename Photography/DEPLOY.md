@@ -146,6 +146,14 @@ location /       { root /opt/photography-linux-x64-XXXX; }
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
+> **为什么反复强调这个头**：漏了它不会报错，只是会话 Cookie 少一个 `Secure` —— 后台看起来
+> 一切正常，但少了「浏览器只在 HTTPS 下携带它」这道保险。两处兜底可以早点发现：
+>
+> - 后台在后端**自己识别**这次访问是不是明文 HTTP：是的话，登录页上方直接标出
+>   「明文 HTTP 连接」的提示，登录后再补一条 toast（本机 / 内网地址除外，那些本来就该是 http）；
+> - `python tools/check_https.py https://你的域名` 会逐项验收 `Set-Cookie` 是否带 `Secure`
+>   （见 5.2 的清单，那一项失败基本就是这个头没转发）。
+
 > 反代不要剥离后端的安全响应头（`Content-Security-Policy`、`X-Frame-Options`、
 > `X-Content-Type-Options`、`Referrer-Policy`）。CSP 里脚本与样式都只允许同源外部文件——
 > 前端不含内联脚本 / 样式，因此不需要放开 `unsafe-inline`；覆盖或追加 CSP 时请保留这条约束。
@@ -181,7 +189,7 @@ sudo ./run.sh https --domain photos.example.com --email you@example.com
 
 实测（真 nginx 1.24 + 真后端，`scripts` 之外的临时环境）：
 首页/HSTS/CSP 透传、静态 `public, no-cache`、gzip、Cookie `Secure`、80→308、
-`/api/public/` 连打 80 次出现 429 —— 15 项全通过。
+`/api/public/` 连打 80 次出现 429 —— 15 项全通过（新版本又多两项：首页 HTML 可缓存 + 重验证回 304）。
 
 > **并发提示**：内置的 Python 静态服务在几十人同时浏览时开始劣化（瓶颈是线程与 GIL）。
 > 若要对外放开，让 nginx 直接托管前台静态、Python 只跑 API 与 `/admin/`：
@@ -195,7 +203,8 @@ sudo ./run.sh https --domain photos.example.com --email you@example.com
 > 命中 304 不传内容），并**补上 CSP、HSTS 等安全响应头**——注意 nginx 的 `add_header`
 > 不与上层合并，location 里一旦写了 `add_header`，server 段的 HSTS 就失效，所以那里重复写了一遍。
 > 同样实测 15 项全通过（首页 200 + HSTS + CSP、`/assets/` 由 nginx 直接回且带 ETag、
-> `/api/*` 与 `/admin/` 仍走代理、限流生效）。
+> `/api/*` 与 `/admin/` 仍走代理、限流生效）。注意 `--static` 时由 nginx 决定静态缓存头
+> （`expires -1` 等价的「重验证」），后台与 API 仍用后端自己那套策略。
 
 ### 5.2 上线自检清单（P1：明文 HTTP 下 Cookie 不 Secure）
 
@@ -217,6 +226,9 @@ python tools/check_https.py https://photos.example.com
 - [ ] `/api/state` 未登录返回 401（后台接口没被公开）
 - [ ] 静态资源回 `Cache-Control: public, no-cache`（或 nginx 的 `no-cache`）且带
       `Last-Modified` / `ETag`（刷新应命中 304，而不是重下整包）
+- [ ] 首页 / `/admin/` 的 HTML 回 `public, no-cache`（可存、但要重验证），
+      带 `Last-Modified` 且重验证时回 304 —— 不再是 `no-store`（那会导致每次都重下整份 HTML）
+- [ ] 上传的照片（`/assets/img/photos/**`，缩略图除外）回 `public, max-age=3600`
 - [ ] `/api/**` 回 `no-store`（接口响应不落缓存）
 - [ ] 连打 `/api/public/site` 60 次会出现 `429`（反代层限流生效）
 - [ ] 连打写接口（例如 `POST /api/items/photos`）20 次以上会出现 `429`，而同一时刻
@@ -257,17 +269,20 @@ curl -sI http://127.0.0.1:8080/ | head -3                  # 记下当前版本�
 
 ```bash
 git pull                                  # 或上传并解压新的迁移包
-./run.sh doctor                           # 环境自检：Python / FFmpeg / 权限 / 端口
+./run.sh doctor                           # 环境自检：Python / FFmpeg / 权限 / 端口 / 代码版本 / 视频索引
 ```
 
 验证：
 
 ```bash
-curl -sI http://127.0.0.1:8080/assets/css/main.css | grep -i cache-control
+curl -sI http://127.0.0.1:8080/assets/css/main.css | grep -i cache-control   # public, no-cache
+curl -sI http://127.0.0.1:8080/ | grep -i cache-control                     # public, no-cache（旧版是 no-store）
 ls -l assets/video/*.mp4                  # 应有 landscape-sunrise.mp4 与 star-trails-timelapse.mp4
+./run.sh faststart --check                # 自己的视频里若有 moov 在末尾的，这里会列出来
 ```
 
-预期：`Cache-Control: public, no-cache`；两个占位 mp4 存在（各几十 KB）。
+预期：静态资源与 HTML 都是 `public, no-cache`（HTML 以前是 `no-store`，每次访问都要重下整份）；
+两个占位 mp4 存在（各几十 KB）；`faststart --check` 若无输出即「全都可边下边播」。
 若还是 `no-store` 或没有 mp4，说明跑的是旧代码。
 
 **第 2 步 · 让后端只监听本机**（公网 8080 的口子先关掉）
@@ -617,6 +632,12 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 站点资源 404 但后台能用 | 从**项目目录**里启动（`cd` 进项目再 `./run.sh start`） |
 | 服务被 OOM 杀掉 / 整机卡死 | 见下面「内存与 OOM」 |
 | 上传卡在 100% 不起作用 | 服务端在处理（读 EXIF / 生成缩略图与封面），大文件会花几秒；`journalctl -u photography-admin -f` 能看到耗时 |
+| 上传报「文件名里不能出现 .php 这类可执行扩展名」 | 文件名里带双扩展名（`shell.php.jpg`）被拒绝。这类名字没有正常用途，改名为纯照片 / 视频名即可（`shell.jpg`） |
+| 脚本里上传「明明有文件却报失败」 | 整批文件**全部**失败时接口现在回 **400**（body 里仍带逐条 `results` 与 `summary`）；只看状态码的调用方要按 4xx 处理。部分成功仍是 200 + `summary.failed` |
+| 视频点了播放半天没动静，或进度条要等很久 | 索引（`moov`）在文件末尾，浏览器得下完整份才能起播。服务器上跑 `./run.sh faststart --check` 看一眼，然后 `./run.sh faststart` 就地改造（`-c copy`，不重新编码）。`./run.sh doctor` 的「视频索引」一项也会报 |
+| 反复访问还是很慢 | 看响应头：代码资源应是 `public, no-cache`（命中 304 只回响应头），上传的照片是 `public, max-age=3600`。若反代层把 `Cache-Control` 覆盖成长缓存，改完文件会一直看到旧的 |
+| 后台「数据完整性」里有一批**缺失文件** / 卡片显示「缺失」 | 条目的 `src`/`thumb`/`poster` 指向的文件不在了（手工 `rm` 过、上传被中断、迁移漏带）。`./run.sh prune-media` 先演练看清是哪些，确认后 `./run.sh prune-media --delete` —— 删条目走 `store` 会自动备份，改错了从「备份」页恢复 |
+| 媒体目录里堆着没人引用的散图 / 视频 | 同上：`./run.sh prune-media` 会列出「没有任何条目引用、且超过 1 天没动过」的文件（被 git 跟踪的上游示例文件会跳过），确认后加 `--delete` |
 | 日志里成片的 400 / 414 / 505 | 扫描器发的畸形请求。现版本正常回 4xx 且只记一行访问日志；若仍伴随 traceback，说明代码是旧的（`grep -n def\ request_path admin.py` 无输出就该更新） |
 | 日志里 `GET /assets/... 404` | 上传途中有过一次服务重启，页面还引用着中断那次的旧文件名：强制刷新（手机端清站点数据）即可。先确认 `data/*.json` 里确实没有这条引用，再判断为前端残留 |
 | `./run.sh update` 说「不是 git 检出」 | 迁移包解压的部署没有 `.git`：先 `./run.sh adopt --repo <仓库地址>`（见第 8.2 节） |
