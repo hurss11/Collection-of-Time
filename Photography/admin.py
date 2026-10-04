@@ -309,6 +309,21 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:            # noqa: A003
         sys.stderr.write("  %s - %s\n" % (self.address_string(), fmt % args))
 
+    def log_error(self, fmt: str, *args) -> None:              # noqa: A003
+        """把标准库那几条容易误导的日志写明白。
+
+        `http.server` 在**客户端**连接空闲到 `REQUEST_TIMEOUT` 被断开时会写
+        「Request timed out: TimeoutError('timed out')」。这行字很容易被读成
+        「服务端抓外部东西超时」（我见过有人因此去查 FFmpeg 与外网），
+        其实它只说明：这条 keep-alive 连接 120 秒没发过任何数据，收掉而已。
+        """
+        text = (fmt % args) if args else fmt
+        if text.startswith("Request timed out"):
+            self.log_message("客户端连接空闲 %d 秒无数据，已断开（keep-alive 未复用）",
+                             int(REQUEST_TIMEOUT))
+            return
+        self.log_message("%s", text)
+
     def cache_control(self) -> str:
         """按路径决定缓存策略。
 
@@ -2354,6 +2369,33 @@ def command_reset_password(username: str = "") -> int:
     return 0
 
 
+def command_net_status(timeout: float = 3.0) -> int:
+    """探测外链封面抓取要用的域名能不能连上（不启动服务、不发业务请求）。
+
+    用途：服务器上「自动获取封面」失败时，先跑这个分清是**机器出不了网**还是
+    别的原因 —— 海外机房连不上 B 站、不少机房连不上 YouTube，都很常见。
+    """
+    print("外链封面抓取 · 出网连通性")
+    print(f"  允许访问的域名：{', '.join(thumbs.META_HOSTS + thumbs.IMAGE_HOSTS)}")
+    print(f"  出网抓取开关  ：{'已开启' if NET_FETCH else '已关闭（--no-net-fetch / COT_NO_NET_FETCH=1）'}")
+    print()
+    report = thumbs.connectivity(timeout=timeout)
+    for host, info in report.items():
+        if info["ok"]:
+            print(f"  [通 ] {host:20} {info['seconds']:.2f}s")
+        else:
+            print(f"  [不通] {host:20} {info['seconds']:.2f}s  {info.get('error', '')}")
+    reachable = sum(1 for info in report.values() if info["ok"])
+    print()
+    print(f"  可达 {reachable}/{len(report)}")
+    if not NET_FETCH:
+        print("  当前已关闭出网抓取，所以这些都是预期现象；封面请手动上传。")
+    elif reachable < len(report):
+        print("  连不上的那些来源，自动抓封面会失败并提示原因；手动上传封面不受影响。")
+        print("  不想让服务出网就加 --no-net-fetch（或 COT_NO_NET_FETCH=1）。")
+    return 0
+
+
 def command_ffmpeg_status() -> int:
     """打印 FFmpeg 探测结果（不启动服务）。"""
     tools = media.detect_tools(ROOT, verify=True)
@@ -2405,6 +2447,8 @@ def main() -> int:
                         metavar="ORIGIN",
                         help="允许跨域的前端地址，可重复；例如 https://admin.example.com")
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument("--net-status", action="store_true",
+                        help="探测外链封面抓取所需的域名能否连上后退出")
     parser.add_argument("--no-net-fetch", action="store_true",
                         help="禁止服务端出网抓取外链视频封面（离线部署用；仅白名单域名会被访问）")
     parser.add_argument("--print-systemd", action="store_true",
@@ -2448,6 +2492,8 @@ def main() -> int:
         return command_ffmpeg_status()
     if args.fetch_ffmpeg:
         return command_fetch_ffmpeg([])
+    if args.net_status:
+        return command_net_status()
 
     if args.print_systemd:
         print(systemd_unit(args.port, args.session_hours, args.memory_max))

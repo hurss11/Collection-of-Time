@@ -590,8 +590,9 @@ tar -czf ~/photography-backup-$(date +%Y%m%d).tar.gz \
 | 更新提示「有未受信任的作者」 | 提交邮箱不在白名单里：`git log -1 --format=%ae` 确认是自己，然后 `./run.sh update --accept-authors` |
 | 更新提示「正在上传，这次先不动」 | 正常行为（推迟到下一轮；`./run.sh update-check status` 可看）。急的话 `./run.sh update --force` |
 | 更新后服务起不来 | 已自动回滚并重新拉起，看 `./run.sh logs 80` 定位这次发布的问题；回滚记录在 `.run/autoupdate.state` |
-| 外链视频存不进去，说「自动抓取失败」 | 服务端出网被挡：`--no-net-fetch` 关掉了、机器连不上服务商（YouTube 在部分机房不可达）、或该视频没有缩略图。手动上传一张封面即可；确认不需要自动抓取就用 `--no-net-fetch` 跑 |
+| 外链视频存不进去，说「自动抓取失败」 | 先在服务器上跑 `./run.sh net-check`：多半是这台机器连不上服务商（海外机房连不上 B 站、不少机房连不上 YouTube）。手动上传一张封面即可；确认不需要自动抓取就用 `--no-net-fetch` 跑 |
 | 「自动获取封面」按钮不显示 | `/api/schema` 里 `netFetch=false`，说明启动时带了 `--no-net-fetch`（或设了 `COT_NO_NET_FETCH=1`） |
+| 日志里成片的 `客户端连接空闲 N 秒无数据，已断开` | 浏览器留下的 keep-alive 连接 120 秒没发数据，被服务端收掉——正常现象，不是错误。老版本这里写的是标准库原文 `Request timed out: TimeoutError('timed out')`，容易被误读成「抓外网超时」或「FFmpeg 超时」；与外链抓取、FFmpeg 都无关 |
 
 排查时先跑一次 `./run.sh doctor`，多数问题它会直接点名。
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import socket
 import threading
 import time
 import urllib.error
@@ -46,6 +47,8 @@ MAX_HOPS = 3
 META_HOSTS = ("api.bilibili.com", "vimeo.com")
 # 允许访问的图片域名（前导点 = 按域名边界做后缀匹配）
 IMAGE_HOSTS = ("i.ytimg.com", ".hdslb.com", ".vimeocdn.com")
+# 自检用：每个白名单项挑一个具体主机来探测（我们只可能连这些）
+PROBE_HOSTS = ("api.bilibili.com", "i0.hdslb.com", "i.ytimg.com", "vimeo.com", "i.vimeocdn.com")
 
 IMAGE_MAGIC = (
     (b"\xff\xd8\xff", ".jpg"),
@@ -142,7 +145,7 @@ def _read_limited(response, *, limit: int, deadline: float | None = None) -> byt
     return b"".join(chunks)
 
 
-def _with_deadline(func, timeout: float):
+def _with_deadline(func, timeout: float, *, on_timeout: str | None = None):
     """在硬墙钟内跑 `func`；到点就放弃。
 
     为什么不能只靠 `urlopen(timeout=…)`：那个超时是**按地址**算的，而一个域名往往
@@ -162,7 +165,8 @@ def _with_deadline(func, timeout: float):
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        raise ThumbError(f"抓取超时（{timeout:.0f} 秒预算已用完），请稍后重试或手动上传封面")
+        raise ThumbError(on_timeout
+                         or f"抓取超时（{timeout:.0f} 秒预算已用完），请稍后重试或手动上传封面")
     if "error" in box:
         raise box["error"]
     return box.get("value")
@@ -206,8 +210,38 @@ def _request(url: str, *, allowed: tuple[str, ...], headers: dict[str, str] | No
     except ThumbError:
         raise
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise ThumbError(f"连不上远端：{exc}") from exc
+        # 把主机名写进消息：出网被挡时「连不上远端」这种话很难查（连的是谁？）
+        host = urllib.parse.urlsplit(url).hostname or url
+        raise ThumbError(f"连不上 {host}：{exc}") from exc
     return status, response_headers, body
+
+
+def connectivity(timeout: float = 3.0) -> dict[str, dict]:
+    """探测各服务商域名能不能连上（只做 TCP 443 连接，不发任何请求）。
+
+    给排查用：`python3 admin.py --net-status` / `./run.sh net-check`。
+    海外机房常连不上 B 站，也有不少机房连不上 YouTube —— 那时自动抓封面会失败，
+    但手动上传封面、外链播放本身都不受影响。
+
+    `timeout` 是**每个域名**的硬墙钟：`socket` 的超时是按地址算的，一个域名解析出
+    多个地址时会成倍拖长，探针自己不能比被测的东西还慢。
+    """
+    report: dict[str, dict] = {}
+    for host in PROBE_HOSTS:
+        started = time.monotonic()
+
+        def probe(host=host) -> None:
+            with socket.create_connection((host, 443), timeout=timeout):
+                return None
+
+        try:
+            _with_deadline(probe, timeout, on_timeout=f"连接超时（{timeout:.0f} 秒）")
+            report[host] = {"ok": True, "seconds": round(time.monotonic() - started, 2)}
+        except (ThumbError, OSError) as exc:
+            detail = str(exc) if isinstance(exc, ThumbError) else f"{type(exc).__name__}: {exc}"
+            report[host] = {"ok": False, "seconds": round(time.monotonic() - started, 2),
+                            "error": detail}
+    return report
 
 
 # ---------------------------------------------------------------- 图片
@@ -371,6 +405,6 @@ def fetch_cover(provider: str, src: str, *, budget: float = TOTAL_TIMEOUT) -> di
     return _with_deadline(lambda: _fetch(info, deadline, limit), limit)
 
 
-__all__ = ["ThumbError", "check_url", "image_suffix", "plan", "fetch_cover",
-           "META_HOSTS", "IMAGE_HOSTS", "MAX_BYTES", "MIN_BYTES",
+__all__ = ["ThumbError", "check_url", "image_suffix", "plan", "fetch_cover", "connectivity",
+           "META_HOSTS", "IMAGE_HOSTS", "PROBE_HOSTS", "MAX_BYTES", "MIN_BYTES",
            "TOTAL_TIMEOUT", "AUTOFILL_TIMEOUT"]

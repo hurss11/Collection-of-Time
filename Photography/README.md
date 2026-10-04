@@ -49,6 +49,7 @@ chmod +x run.sh          # 首次
 | `./run.sh status` | 运行状态、运行时长、FFmpeg 来源、数据条数 |
 | `./run.sh logs [-f]` | 查看日志（`-f` 持续跟踪） |
 | `./run.sh doctor` | 环境自检：Python 版本、必需文件、写权限、JSON 合法性、端口占用 |
+| `./run.sh net-check` | 自检外链封面抓取要用的域名能否连上（出网问题一眼看清） |
 | `./run.sh install-ffmpeg` | 下载 FFmpeg 静态构建到 `bin/`（可透传 `--check` / `--file` / `--url` 等） |
 | `./run.sh create-user` / `reset-password` | 创建管理员 / 重置密码 |
 | `./run.sh systemd [--install]` | 生成 systemd 单元（加 `--install` 需 root，直接写入并启用） |
@@ -732,6 +733,27 @@ graph TD
 > 抓回来的封面存成 `assets/video/posters/up-<provider>-<id>.<ext>`，与手动上传的
 > `up-<原名>.<ext>` 一样受启动时的孤儿回收管（见「上传时的自动化」）。
 > 同一张图重复抓会得到 `-1`、`-2` 后缀，同名不覆盖。
+
+**抓不到的时候先查「这台机器能不能出网」**：海外机房连不上 B 站、不少机房连不上
+YouTube，这比代码问题常见得多。一条命令看清：
+
+```bash
+./run.sh net-check          # 等价于 python3 admin.py --net-status
+```
+
+```
+外链封面抓取 · 出网连通性
+  允许访问的域名：api.bilibili.com, vimeo.com, i.ytimg.com, .hdslb.com, .vimeocdn.com
+  出网抓取开关  ：已开启
+
+  [通 ] api.bilibili.com     0.02s
+  [不通] i.ytimg.com          3.01s  连接超时（3 秒）
+  可达 3/5
+  连不上的那些来源，自动抓封面会失败并提示原因；手动上传封面不受影响。
+```
+
+抓取失败时的报错都会指明**连的是哪个域名**（例如 `连不上 i.ytimg.com：…`），
+不会只给一句含糊的「失败」。
 
 > 在新增 / 编辑表单里上传的封面会**立刻落盘**（先有文件才能拿到路径）。如果那个弹窗最后
 > 没保存，文件就成了孤儿；服务启动时会回收 `assets/video/posters/up-*` 里
