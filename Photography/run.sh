@@ -488,9 +488,9 @@ PY
   else
     local dirty_code=() status_out line path prefix f
     # porcelain 输出的前缀随环境而异（有的 git 给相对 cwd 的路径，有的给相对仓库根的），
-    # 统一按「cwd 相对仓库根」的前缀削掉一层，后面的匹配规则才不用管 cwd 在哪儿
+    # 统一按「cwd 相对仓库根」的前缀削掉一层，后面的判断才不用管 cwd 在哪儿
     prefix="$(git rev-parse --show-prefix 2>/dev/null)"
-    status_out="$(git status --porcelain 2>/dev/null)"
+    status_out="$(git status --porcelain --untracked-files=no 2>/dev/null)"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       path="${line:3}"
@@ -502,13 +502,12 @@ PY
           "$prefix"*) path="${path#"$prefix"}" ;;
         esac
       fi
+      # 判定只看一件事：这个文件在 git 里有没有被跟踪（上传的照片视频是未跟踪的，不在上面这份
+      # 列表里）。唯一的例外是 data/ —— 它虽然被跟踪，但服务器上那份才是真的，改了是正常的。
       case "$path" in
-        # 站点内容：改了是正常的（data/ 由后台写入；上传的照片视频封面本来就不在 git 里）
-        data/*|assets/img/photos/*|assets/video/posters/*|assets/video/originals/*|assets/video/raw/*) ;;
-        # 上游代码（与 adminlib/autoupdate.py 的 CODE_PATHS 同源）
-        admin.py|serve.py|run.sh|index.html|favicon.svg|README.md|DEPLOY.md|admin/*|adminlib/*|tools/*|assets/css/*|assets/js/*|assets/video/README.md)
-          dirty_code+=("$path") ;;
+        data/*) continue ;;
       esac
+      dirty_code+=("$path")
     done <<< "$status_out"
     if [ "${#dirty_code[@]}" -eq 0 ]; then
       ok "代码版本 : 上游代码与 git 里的一致"
