@@ -134,6 +134,11 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 
 必须放在 HTTPS 反向代理之后，否则会话 Cookie 与密码会以明文传输：
 
+> **首次建号必须在服务器本机完成**：`POST /api/auth/setup` 只接受回环地址，
+> 反代下按 `X-Real-IP` 判断真实来源，所以公网直接访问返回 403。
+> 第一次部署时先 `./run.sh create-user`，或用上面的 SSH 隧道从本地浏览器建号，
+> 然后再对外开放。
+
 ```nginx
 location /admin/ { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; }
 location /api/   { proxy_pass http://127.0.0.1:8080; proxy_set_header Host $host; }

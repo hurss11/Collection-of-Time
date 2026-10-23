@@ -4,7 +4,8 @@
 设计目标：后台的任何一次保存都不应该把数据写坏。
    - 写入前先把现有文件复制到 data/.backups/；
    - 通过「写临时文件 + os.replace」保证原子性，进程中断也不会留下半截 JSON；
-   - 保存前做结构校验，明显错误的提交直接拒绝。
+   - 保存前做结构校验，明显错误的提交直接拒绝；
+   - 「读 → 改 → 写」与上传命名都在进程内串行化，并发请求不会互相覆盖。
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -33,6 +35,10 @@ ID_PREFIX: dict[str, str] = {
 
 BACKUP_KEEP = 40
 MAX_ITEMS = 20000
+
+# 数据文件与上传目录的写操作串行化：ThreadingHTTPServer 下每个请求一个线程，
+# 「读 → 改 → 写」不加锁会互相覆盖，同名的两个上传也会抢同一个路径。
+_WRITE_LOCK = threading.RLock()
 
 
 class StoreError(ValueError):
@@ -123,18 +129,29 @@ def safe_filename(name: str, *, fallback: str = "file") -> str:
 
 
 def unique_path(directory: Path, filename: str) -> Path:
-    """在目录中生成不冲突的路径，例如 sunset.jpg → sunset-1.jpg。"""
-    directory.mkdir(parents=True, exist_ok=True)
-    candidate = directory / filename
-    if not candidate.exists():
-        return candidate
+    """在目录中生成不冲突的路径，例如 sunset.jpg → sunset-1.jpg。
 
-    stem = candidate.stem
-    suffix = candidate.suffix
-    for index in range(1, 1000):
-        candidate = directory / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
-            return candidate
+    用 `O_CREAT|O_EXCL` **占位**而不是「查一下再返回」：两个并发上传同名文件时，
+    后者会拿到 `sunset-1.jpg` 而不是覆盖前者。占位留下的是空文件，调用方随后
+    会把它替换成真实内容；上传失败时会剩下一个 0 字节文件（不出现在数据里，
+    可由 tools/prune_media.py 清理）。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+
+    candidate = Path(filename)
+    stem, suffix = candidate.stem, candidate.suffix
+    names = [filename] + [f"{stem}-{index}{suffix}" for index in range(1, 1000)]
+
+    with _WRITE_LOCK:
+        for name in names:
+            path = directory / name
+            try:
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise StoreError(f"无法创建文件：{name}（{exc}）") from exc
+            return path
     raise StoreError(f"目录中同名文件过多：{filename}")
 
 
@@ -235,11 +252,12 @@ class Store:
         warnings = self.validate(collection, items)
         path = self.path_of(collection)
 
-        if backup and path.exists():
-            self._backup(collection)
+        with _WRITE_LOCK:
+            if backup and path.exists():
+                self._backup(collection)
 
-        payload = json.dumps(items, ensure_ascii=False, indent=2) + "\n"
-        self._atomic_write(path, payload)
+            payload = json.dumps(items, ensure_ascii=False, indent=2) + "\n"
+            self._atomic_write(path, payload)
         return warnings
 
     def upsert(self, collection: str, item: dict) -> tuple[dict, list[str]]:
@@ -247,30 +265,33 @@ class Store:
         if not isinstance(item, dict):
             raise StoreError("条目必须是对象")
 
-        items = self.load(collection)
-        item_id = str(item.get("id") or "").strip()
-        if not item_id:
-            item_id = self.next_id(collection)
-            item = {**item, "id": item_id}
+        # 读-改-写必须整体加锁，否则并发提交会互相覆盖（后写的赢）
+        with _WRITE_LOCK:
+            items = self.load(collection)
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                item_id = self.next_id(collection)
+                item = {**item, "id": item_id}
 
-        for index, existing in enumerate(items):
-            if str(existing.get("id")) == item_id:
-                items[index] = {**existing, **item}
-                break
-        else:
-            items.append(item)
+            for index, existing in enumerate(items):
+                if str(existing.get("id")) == item_id:
+                    items[index] = {**existing, **item}
+                    break
+            else:
+                items.append(item)
 
-        warnings = self.save(collection, items)
-        saved = next(i for i in items if str(i.get("id")) == item_id)
-        return saved, warnings
+            warnings = self.save(collection, items)
+            saved = next(i for i in items if str(i.get("id")) == item_id)
+            return saved, warnings
 
     def delete(self, collection: str, item_id: str) -> bool:
-        items = self.load(collection)
-        remaining = [i for i in items if str(i.get("id")) != item_id]
-        if len(remaining) == len(items):
-            return False
-        self.save(collection, remaining)
-        return True
+        with _WRITE_LOCK:
+            items = self.load(collection)
+            remaining = [i for i in items if str(i.get("id")) != item_id]
+            if len(remaining) == len(items):
+                return False
+            self.save(collection, remaining)
+            return True
 
     def next_id(self, collection: str) -> str:
         """生成下一个可用 id，例如 photos → p-009。"""
@@ -332,10 +353,11 @@ class Store:
             raise StoreError(f"无法从备份名推断集合：{safe_name}")
 
         target = self.path_of(collection)
-        if target.exists():
-            self._backup(collection)   # 恢复前再存一份现状，可反复回滚
+        with _WRITE_LOCK:
+            if target.exists():
+                self._backup(collection)   # 恢复前再存一份现状，可反复回滚
 
-        shutil.copy2(source, target)
+            shutil.copy2(source, target)
         return collection
 
     def prune_backups(self, keep: int = BACKUP_KEEP) -> int:
@@ -354,7 +376,8 @@ class Store:
     @staticmethod
     def _atomic_write(path: Path, payload: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(path.suffix + ".tmp")
+        # 临时文件名必须唯一：固定叫 x.json.tmp 时，两个线程会往同一个文件里写
+        temp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}{os.urandom(3).hex()}.tmp")
         try:
             with temp.open("w", encoding="utf-8", newline="\n") as fh:
                 fh.write(payload)

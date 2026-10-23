@@ -230,6 +230,22 @@ def _is_local_peer(peer: str) -> bool:
     return any(address in net for net in TRUSTED_PROXY_NETS)
 
 
+def _is_loopback_peer(peer: str) -> bool:
+    """严格回环判断（不含内网），用于「只允许在服务器本机执行」的入口。"""
+    try:
+        address = ipaddress.ip_address(peer.split("%")[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
+def _const_eq(left: str, right: str) -> bool:
+    """定长比较两个字符串（compare_digest 不接受含非 ASCII 的 str）。"""
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
 def public_csp(connect_src: str = "'self'") -> str:
     """前台页面的 CSP。
 
@@ -277,22 +293,37 @@ class Handler(SimpleHTTPRequestHandler):
 
         反向代理（nginx 与后端同机）下 socket 对端永远是 127.0.0.1，直接拿它
         对所有人计数会退化成「反代IP|用户名」：别人试错 5 次就能把管理员锁在门外。
-        因此**只在对端是内网 / 回环地址时**采信 `X-Forwarded-For` 的第一跳；
-        对端是公网地址时不采信，避免伪造这个头绕过限流。
+        因此**只在对端是内网 / 回环地址时**采信转发头，且采信的必须是
+        **反代自己写入**的那一段：
+
+        - `X-Real-IP`：nginx 用 `$remote_addr` 覆盖写入，客户端伪造不了；
+        - `X-Forwarded-For`：nginx 用 `$proxy_add_x_forwarded_for` **追加**，
+          客户端伪造的值只会留在最左边，只有**最后一跳**才是反代看到的对端。
+
+        早先取的是最左一跳（等价于直接采信客户端），每个请求换一个伪造值
+        就能换一个限流桶，「连续 5 次失败锁 5 分钟」永远不触发。
         """
         peer = (self.client_address[0] if self.client_address else "") or ""
         # 扫描器爱发畸形请求行：parse_request 会在解析请求头**之前**就调 send_error，
         # 而 send_error → log_message → 这里，此时 self.headers 还不存在。
         # 直接取属性会让异常盖掉本该返回的 400/414（日志还被 traceback 刷屏）。
         headers = getattr(self, "headers", None)
-        forwarded = ((headers.get("X-Forwarded-For") or "") if headers else "").split(",")[0].strip()
-        if not forwarded or not _is_local_peer(peer):
+        if headers is None or not _is_local_peer(peer):
             return peer
-        try:
-            candidate = ipaddress.ip_address(forwarded.split("%")[0])
-        except ValueError:
-            return peer
-        return peer if candidate.is_unspecified else str(candidate)
+        candidates = (
+            (headers.get("X-Real-IP") or "").strip(),
+            ((headers.get("X-Forwarded-For") or "").split(",")[-1]).strip(),
+        )
+        for forwarded in candidates:
+            if not forwarded:
+                continue
+            try:
+                candidate = ipaddress.ip_address(forwarded.split("%")[0])
+            except ValueError:
+                continue
+            if not candidate.is_unspecified:
+                return str(candidate)
+        return peer
 
     def address_string(self) -> str:
         """日志与限流统一用真实客户端 IP。"""
@@ -403,7 +434,9 @@ class Handler(SimpleHTTPRequestHandler):
         allowed = getattr(self.server, "allow_origins", []) or []
         if not allowed:
             return ""
-        request_origin = (self.headers.get("Origin") or "").strip()
+        # 畸形请求行时 parse_request 会在 headers 建好之前就走到 end_headers
+        headers = getattr(self, "headers", None)
+        request_origin = ((headers.get("Origin") or "") if headers else "").strip()
         if not request_origin:
             return ""
         return request_origin if (request_origin in allowed or "*" in allowed) else ""
@@ -429,6 +462,26 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": False, "error": message}, status, extra)
 
     # ---------- 请求体 ----------
+
+    def parse_request(self) -> bool:
+        """在标准解析之上拒绝不支持的请求体传输方式。
+
+        只实现了定长（`Content-Length`）请求体：`Transfer-Encoding: chunked` 的
+        请求体根本不会被读，残留字节会被当成下一个请求的开头（keep-alive 错位，
+        放到别的代理后面就是请求走私）。宁可显式 411，也不要静默忽略。
+        """
+        if not super().parse_request():
+            return False
+
+        encoding = (self.headers.get("Transfer-Encoding") or "").strip().lower()
+        if encoding and encoding != "identity":
+            self.close_connection = True
+            self.send_error_json(
+                "不支持 Transfer-Encoding（请改用 Content-Length）",
+                HTTPStatus.LENGTH_REQUIRED,
+            )
+            return False
+        return True
 
     def handle_one_request(self) -> None:
         """每个请求开始时清空请求体缓存与临时文件清单。
@@ -606,10 +659,22 @@ class Handler(SimpleHTTPRequestHandler):
         return SESSIONS.verify(self.cookies.get(auth.COOKIE_SESSION, ""))
 
     def csrf_matches(self) -> bool:
-        """双提交校验：Cookie 里的 CSRF 值必须等于请求头里的值。"""
+        """双提交校验，并与会话绑定。
+
+        会话有效时，要求 Cookie 里的 CSRF 值等于**由该会话令牌派生**的值：
+        攻击者即使能在本站写 Cookie，也读不到 HttpOnly 的会话令牌，因此伪造不出
+        能通过校验的一对值。没有有效会话时（登录 / 建号）退化为纯双提交——
+        那时本身没有可绑定的凭据，且 SameSite=Strict 已经在挡跨站请求。
+        """
         cookie = self.cookies.get(auth.COOKIE_CSRF, "")
         header = self.headers.get("X-CSRF-Token", "")
-        return bool(cookie) and bool(header) and hmac.compare_digest(cookie, header)
+        if not cookie or not header or not _const_eq(cookie, header):
+            return False
+
+        token = self.cookies.get(auth.COOKIE_SESSION, "")
+        if token and SESSIONS.verify(token) is not None:
+            return _const_eq(cookie, SESSIONS.csrf_for(token))
+        return True
 
     def session_cookies(self, session_token: str, max_age: int,
                         csrf_token: str | None = None) -> list[tuple[str, str]]:
@@ -964,8 +1029,13 @@ class Handler(SimpleHTTPRequestHandler):
         session = self.current_session()
         account = ACCOUNTS.account()
 
-        # 每次查询会话都保证客户端持有 CSRF Cookie，登录 / 建号时才能带上
-        csrf = self.cookies.get(auth.COOKIE_CSRF) or auth.SessionManager.new_csrf_token()
+        # 每次查询会话都保证客户端持有 CSRF Cookie，登录 / 建号时才能带上；
+        # 已登录时下发与会话绑定的值（页面加载一定会走这里，旧 Cookie 不会卡住）
+        token = self.cookies.get(auth.COOKIE_SESSION, "")
+        if session is not None and token:
+            csrf = SESSIONS.csrf_for(token)
+        else:
+            csrf = self.cookies.get(auth.COOKIE_CSRF) or auth.SessionManager.new_csrf_token()
         extra = [("Set-Cookie", auth.build_cookie(
             auth.COOKIE_CSRF, csrf, max_age=86400, http_only=False, secure=self.secure_cookie,
         ))]
@@ -980,7 +1050,19 @@ class Handler(SimpleHTTPRequestHandler):
         }, extra=extra)
 
     def api_auth_setup(self) -> None:
-        """首次创建管理员账号（仅在还没有账号时可用）。"""
+        """首次创建管理员账号（仅在还没有账号时可用）。
+
+        只允许从服务器本机发起：反代下 socket 对端恒为 127.0.0.1，所以必须看
+        解析出来的**真实**客户端 IP，否则任何公网请求都会被当成「本机」——
+        那等于把「抢注管理员」开放给扫描器。
+        """
+        if not _is_loopback_peer(self.client_ip()):
+            raise ApiError(
+                "首次创建管理员只能在服务器本机完成：用 SSH 隧道"
+                "（ssh -N -L 8080:127.0.0.1:8080 用户名@服务器）打开后台，"
+                "或在服务器上直接执行 python admin.py --create-user",
+                HTTPStatus.FORBIDDEN,
+            )
         if ACCOUNTS.has_account:
             raise ApiError("管理员账号已存在，请直接登录", HTTPStatus.CONFLICT)
 
@@ -997,7 +1079,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         account = ACCOUNTS.create_account(username, password)
         token, ttl = SESSIONS.issue(account)
-        csrf = auth.SessionManager.new_csrf_token()
+        csrf = SESSIONS.csrf_for(token)
 
         remember("创建管理员", account.username)
         self.send_json(
@@ -1046,7 +1128,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         LIMITER.record_success(key)
         token, ttl = SESSIONS.issue(account)
-        csrf = auth.SessionManager.new_csrf_token()
+        csrf = SESSIONS.csrf_for(token)
 
         remember("登录成功", f"{account.username}@{ip}")
         self.send_json(
@@ -1106,7 +1188,7 @@ class Handler(SimpleHTTPRequestHandler):
         token, ttl = SESSIONS.issue(account)
         self.send_json(
             {"ok": True, "message": "密码已更新，其它设备的登录状态已失效", "expiresIn": ttl},
-            extra=self.session_cookies(token, ttl),
+            extra=self.session_cookies(token, ttl, SESSIONS.csrf_for(token)),
         )
 
     # ---------- 状态 ----------
@@ -2751,7 +2833,7 @@ def main() -> int:
 
     account = ACCOUNTS.account()
     if account is None:
-        account_text = "未创建（首次打开界面会引导创建）"
+        account_text = "未创建（在服务器本机打开后台创建，或执行 --create-user）"
     else:
         account_text = account.username
 
@@ -2775,7 +2857,8 @@ def main() -> int:
     if external:
         print(f"  访问地址 : http://{local_ip()}:{args.port}/admin/")
     if account is None:
-        print("\n  下一步：在浏览器里创建管理员账号，或执行 python admin.py --create-user")
+        print("\n  下一步：执行 python admin.py --create-user，")
+        print("           或从服务器本机（含 SSH 隧道）打开后台创建——公网访问建号会被拒绝")
     print("  按 Ctrl+C 停止。")
 
     if not args.no_browser:
@@ -2795,4 +2878,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except auth.AuthError as exc:
+        # 配置文件损坏时给一句人话，而不是甩一整段 traceback（systemd 日志里也好找）
+        print(f"\n无法加载管理员配置：{exc.message}\n", file=sys.stderr)
+        raise SystemExit(1)

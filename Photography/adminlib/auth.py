@@ -7,7 +7,8 @@
 2. 会话是服务端用密钥签名的令牌（HMAC-SHA256），有效期可配，
    令牌里带上密码指纹，改密后所有旧会话立即失效；
 3. Cookie 走 HttpOnly + SameSite=Strict，前端 JS 读不到会话值；
-4. 另有可读的 CSRF Cookie，写操作必须把它的值回填到请求头（双提交校验）；
+4. 另有可读的 CSRF Cookie，写操作必须把它的值回填到请求头（双提交校验）；已登录时
+   该值还要求等于由会话令牌派生出来的值，因此能在本站写 Cookie 的攻击者也伪造不出；
 5. 登录失败按 IP 限流并锁定，前后端都能拿到剩余次数与等待秒数。
 """
 from __future__ import annotations
@@ -38,6 +39,12 @@ CONFIG_NAME = "admin.config.json"
 COOKIE_SESSION = "cot_session"
 COOKIE_CSRF = "cot_csrf"
 
+# 配置文件损坏时的处置建议。会直接作为 API 错误文案回给客户端，所以不写绝对路径。
+CORRUPT_CONFIG_HINT = (
+    "为避免覆盖可能还能恢复的账号数据，已停止加载。请先备份该文件并检查内容；"
+    "确认要重新开始时，把它改名或删除，再执行 python admin.py --create-user"
+)
+
 SESSION_COOKIE_PREFIX = "v1"
 
 
@@ -49,6 +56,15 @@ class AuthError(Exception):
         self.message = message
         self.status = status
         self.retry_after = retry_after
+
+
+def _const_eq(left: str, right: str) -> bool:
+    """定长比较两个字符串。
+
+    `hmac.compare_digest` 收到含非 ASCII 的 str 会抛 TypeError——中文用户名或
+    中文密码会让登录/改密直接 500，所以统一先编码成 UTF-8 再比。
+    """
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
 # ============================================================
@@ -135,12 +151,21 @@ class AccountStore:
 
         if self.path.is_file():
             try:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    self._data = payload
-                    return self._data
-            except (json.JSONDecodeError, OSError):
-                pass
+                payload = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            except (json.JSONDecodeError, OSError) as exc:
+                # 绝不能像「全新安装」那样返回空账号：那会让 /api/auth/setup 重新打开，
+                # 而且随后的 save() 会把这份（可能还救得回来的）配置直接覆盖掉。
+                raise AuthError(
+                    f"{CONFIG_NAME} 无法读取或解析（{exc}）。{CORRUPT_CONFIG_HINT}",
+                    status=500,
+                ) from exc
+            if not isinstance(payload, dict):
+                raise AuthError(
+                    f"{CONFIG_NAME} 的顶层不是 JSON 对象。{CORRUPT_CONFIG_HINT}",
+                    status=500,
+                )
+            self._data = payload
+            return self._data
 
         self._data = {"version": 1, "account": None, "sessionSecret": secrets.token_hex(SESSION_SECRET_BYTES)}
         return self._data
@@ -194,7 +219,7 @@ class AccountStore:
             # 即便没有账号也走一次哈希，避免通过耗时判断账号是否存在
             hash_password("dummy-password-for-timing", iterations=PBKDF2_ITERATIONS)
             return None
-        if not hmac.compare_digest(account.username, (username or "").strip()):
+        if not _const_eq(account.username, (username or "").strip()):
             hash_password("dummy-password-for-timing", iterations=PBKDF2_ITERATIONS)
             return None
         return account if verify_password(account.record, password) else None
@@ -205,7 +230,7 @@ class AccountStore:
             raise AuthError("尚未创建管理员账号", status=400)
         if not verify_password(account.record, current):
             raise AuthError("当前密码不正确", status=403)
-        if hmac.compare_digest(current, new):
+        if _const_eq(current, new):
             raise AuthError("新密码不能与当前密码相同", status=400)
 
         record = hash_password(new)
@@ -347,14 +372,23 @@ class SessionManager:
 
         # 改过密码的旧会话立即失效
         account = self.store.account()
-        if account is None or not hmac.compare_digest(
+        if account is None or not _const_eq(
             str(payload.get("f", "")), password_fingerprint(account.record)
         ):
             return None
-        if not hmac.compare_digest(str(payload.get("u", "")), account.username):
+        if not _const_eq(str(payload.get("u", "")), account.username):
             return None
 
         return payload
+
+    def csrf_for(self, token: str) -> str:
+        """派生与会话绑定的 CSRF 值（无状态：同一会话恒定）。
+
+        这样即便攻击者能在本站写入 Cookie（同站子域、HTTP 降级注入），也拿不到
+        HttpOnly 的会话令牌，就伪造不出能通过校验的一对值。
+        """
+        mac = hmac.new(self.store.session_secret, b"csrf:" + token.encode("utf-8"), hashlib.sha256).digest()
+        return _b64e(mac[:18])
 
     @staticmethod
     def new_csrf_token() -> str:

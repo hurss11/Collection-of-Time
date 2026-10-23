@@ -254,7 +254,7 @@ python admin.py --print-systemd       # 生成 systemd 单元文件
 | 密码存储 | PBKDF2-HMAC-SHA256，30 万次迭代 + 16 字节随机盐，只存哈希 |
 | 会话 | 服务端 HMAC-SHA256 签名的令牌，默认 12 小时有效（`--session-hours`） |
 | 会话 Cookie | `HttpOnly` + `SameSite=Strict`，前端 JS 读不到令牌 |
-| CSRF | 双提交：可读的 `cot_csrf` Cookie 必须回填到 `X-CSRF-Token` 头，所有写操作都校验 |
+| CSRF | 双提交 + 会话绑定：可读的 `cot_csrf` Cookie 必须回填到 `X-CSRF-Token` 头；已登录时该值还必须等于**由会话令牌派生**的值（拿不到 HttpOnly 会话就伪造不出），所有写操作都校验 |
 | 登录限流 | 同一「IP + 用户名」在 5 分钟内失败 5 次即锁定 5 分钟，锁定期间密码正确也拒绝 |
 | 改密 | 需要校验当前密码；改密后**其它设备的所有会话立即失效** |
 | 账号枚举防护 | 用户不存在时也走一次哈希运算，避免通过响应耗时区分 |
@@ -313,7 +313,7 @@ python admin.py --host 0.0.0.0 --allow-origin https://admin.example.com
 | 接口 | 说明 |
 | --- | --- |
 | `GET /api/auth/session` | 当前登录状态、是否需要初始化、并下发 CSRF Cookie |
-| `POST /api/auth/setup` | 首次创建管理员（仅在无账号时可用） |
+| `POST /api/auth/setup` | 首次创建管理员（仅在无账号时可用；**只接受回环地址**，公网访问返回 403） |
 | `POST /api/auth/login` | 登录 |
 | `POST /api/auth/logout` | 退出 |
 | `POST /api/auth/password` | 修改密码 |
