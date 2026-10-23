@@ -251,7 +251,7 @@ python admin.py --print-systemd       # 生成 systemd 单元文件
 
 | 项目 | 实现 |
 | --- | --- |
-| 密码存储 | PBKDF2-HMAC-SHA256，30 万次迭代 + 16 字节随机盐，只存哈希 |
+| 密码存储 | PBKDF2-HMAC-SHA256，60 万次迭代 + 16 字节随机盐，只存哈希；迭代数随记录存盘，旧哈希在下次登录成功时自动升级 |
 | 会话 | 服务端 HMAC-SHA256 签名的令牌，默认 12 小时有效（`--session-hours`） |
 | 会话 Cookie | `HttpOnly` + `SameSite=Strict`，前端 JS 读不到令牌 |
 | CSRF | 双提交 + 会话绑定：可读的 `cot_csrf` Cookie 必须回填到 `X-CSRF-Token` 头；已登录时该值还必须等于**由会话令牌派生**的值（拿不到 HttpOnly 会话就伪造不出），所有写操作都校验 |

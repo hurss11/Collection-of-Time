@@ -3,7 +3,8 @@
 
 只用标准库。安全设计要点：
 
-1. 密码用 PBKDF2-HMAC-SHA256（默认 30 万次迭代）加盐哈希，永不落盘明文；
+1. 密码用 PBKDF2-HMAC-SHA256（默认 60 万次）加盐哈希，永不落盘明文；迭代数随记录存盘，
+   旧记录在下次登录成功时自动用新参数重哈希；
 2. 会话是服务端用密钥签名的令牌（HMAC-SHA256），有效期可配，
    令牌里带上密码指纹，改密后所有旧会话立即失效；
 3. Cookie 走 HttpOnly + SameSite=Strict，前端 JS 读不到会话值；
@@ -25,7 +26,8 @@ from pathlib import Path
 
 # ---------- 参数 ----------
 
-PBKDF2_ITERATIONS = 300_000
+PBKDF2_ITERATIONS = 600_000       # OWASP 对 PBKDF2-HMAC-SHA256 的现行建议值；
+                                  # 旧配置（30 万）留下的哈希会在下次登录成功时自动升级
 PBKDF2_ALGO = "sha256"
 SALT_BYTES = 16
 SESSION_SECRET_BYTES = 32
@@ -222,7 +224,38 @@ class AccountStore:
         if not _const_eq(account.username, (username or "").strip()):
             hash_password("dummy-password-for-timing", iterations=PBKDF2_ITERATIONS)
             return None
-        return account if verify_password(account.record, password) else None
+        if not verify_password(account.record, password):
+            return None
+        # 迭代数低于当前目标值时顺手升级；返回带新记录的账号，
+        # 否则会话载荷里的口令指纹会对不上刚写进盘的新哈希。
+        return self._upgrade_hash(account, password) or account
+
+    def _upgrade_hash(self, account: Account, password: str) -> Account | None:
+        """登录成功时把低迭代数的旧哈希就地升级，返回带新记录的账号。"""
+        try:
+            iterations = int(account.record.get("iterations") or 0)
+        except (TypeError, ValueError):
+            return None
+        if iterations >= PBKDF2_ITERATIONS:
+            return None
+
+        data = self.load()
+        current = data.get("account")
+        if not isinstance(current, dict):
+            return None
+        # 期间可能已被改密 / 重建：哈希变了就不覆盖
+        if str(current.get("hash", "")) != str(account.record.get("hash", "")):
+            return None
+
+        record = hash_password(password)
+        record["createdAt"] = current.get("createdAt", "")
+        record["updatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        name = str(current.get("username") or account.username)
+
+        fresh: dict[str, object] = {"username": name, **record}
+        data["account"] = fresh
+        self.save()
+        return Account(name, fresh)
 
     def change_password(self, current: str, new: str) -> None:
         account = self.account()
